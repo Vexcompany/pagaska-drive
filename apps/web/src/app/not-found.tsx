@@ -1,11 +1,5 @@
 export const dynamic = "force-static";
 
-/**
- * The 404 page rendered inside the root layout. This file is a Server
- * Component so it never imports the client context tree — it's
- * deliberately dependency-free to avoid any RSC/Client boundary
- * issues during static prerender of the not-found route.
- */
 export default function NotFound() {
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
