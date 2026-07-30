@@ -11,10 +11,12 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "build:packages": "npm run build --workspace @pagaska/shared --workspace @pagaska/upload-engine",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "echo 'lint: not configured'",
-    "clean": "rm -rf apps/*/.next apps/*/out apps/*/dist packages/*/dist workers/*/dist node_modules apps/*/node_modules packages/*/node_modules workers/*/node_modules"
+    "clean": "rm -rf apps/*/.next apps/*/out apps/*/dist packages/*/dist workers/*/dist shared/dist node_modules apps/*/node_modules packages/*/node_modules workers/*/node_modules shared/node_modules",
+    "prepare": "npm run build:packages"
   },
   "engines": {
     "node": ">=18.18"

@@ -37,8 +37,11 @@ JWT_SECRET          # generate: openssl rand -hex 64
 ## 2. Deploy the Worker (Cloudflare)
 
 ```bash
+# from the repo root
+npm install                      # also runs the `prepare` hook which
+                                 # builds @pagaska/shared and
+                                 # @pagaska/upload-engine to dist/
 cd workers/api
-npm install
 npx wrangler login
 npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
@@ -47,6 +50,12 @@ npx wrangler secret put GOOGLE_DRIVE_ROOT
 npx wrangler secret put JWT_SECRET
 npx wrangler deploy
 ```
+
+> The `prepare` script in the root `package.json` automatically
+> compiles the two internal workspace packages (`@pagaska/shared` and
+> `@pagaska/upload-engine`) into `dist/` so that the Worker and the
+> Next.js app can import them. This runs on every `npm install` and
+> `npm ci`, including on Cloudflare's and Vercel's CI.
 
 `wrangler.toml` already declares the worker name and the public
 environment variable names; secrets are kept out of the repo via
@@ -61,7 +70,7 @@ Next.js app needs it.
 ## 3. Deploy the Web app (Vercel)
 
 ```bash
-cd apps/web
+# from the repo root
 vercel link
 vercel env add NEXT_PUBLIC_API_URL          # the worker URL from step 2
 vercel env add JWT_SECRET                   # same value as the worker
@@ -73,11 +82,18 @@ The web app uses `NEXT_PUBLIC_API_URL` to talk to the worker. The
 you opt into edge middleware; the source-of-truth sessions live on the
 Worker.
 
+Vercel's install command runs `npm install` at the repo root, which
+also runs the `prepare` hook that builds the workspace packages. No
+extra configuration is required.
+
 ---
 
 ## 4. Local dev
 
 ```bash
+# from the repo root
+npm install                              # also runs the prepare hook
+
 # terminal 1 — worker
 cd workers/api
 npm run dev          # http://127.0.0.1:8787

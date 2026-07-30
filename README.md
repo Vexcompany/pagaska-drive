@@ -25,7 +25,7 @@ resumable uploads.
 ## Quick start
 
 ```bash
-# 1. install
+# 1. install (also auto-builds @pagaska/shared and @pagaska/upload-engine)
 npm install
 
 # 2. configure
@@ -44,6 +44,21 @@ npm run build
 # 5. test
 npm test
 ```
+
+## Workspace layout
+
+| Package | Built to | Consumers |
+| --- | --- | --- |
+| `@pagaska/shared` | `shared/dist/` | `web`, `worker-api` |
+| `@pagaska/upload-engine` | `packages/upload-engine/dist/` | `web` |
+| `@pagaska/web` | `apps/web/.next/` | Vercel |
+| `@pagaska/worker-api` | bundled by Wrangler | Cloudflare Workers |
+
+Each internal package is compiled to `dist/` and exposes its public
+API through `package.json#exports`. A `prepare` script at the repo
+root runs those builds automatically on every `npm install` / `npm ci`,
+so the Worker and the Next.js app always find a ready-to-import
+`dist/`.
 
 ## Deploy
 
