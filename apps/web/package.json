@@ -2,13 +2,15 @@
   "name": "@pagaska/web",
   "version": "1.0.0",
   "private": true,
+  "description": "Next.js frontend for Pagaska Drive.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'web: no tests yet' && exit 0"
+    "test": "echo 'web: no tests yet' && exit 0",
+    "clean": "rm -rf .next out dist"
   },
   "dependencies": {
     "@pagaska/shared": "*",
