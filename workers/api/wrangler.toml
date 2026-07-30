@@ -7,10 +7,4 @@ compatibility_flags = ["nodejs_compat"]
 # token, jwt secret) are set via:
 #   wrangler secret put NAME
 [vars]
-# Public CORS origin. In dev you can leave this "*", in production
-# replace with your Vercel domain, e.g. "https://pagaska.vercel.app".
 CORS_ORIGIN = "*"
-
-# Resource limits
-[limits]
-cpu_ms = 50
