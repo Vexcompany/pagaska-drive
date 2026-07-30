@@ -6,7 +6,7 @@ const nextConfig = {
   // Next.js compiler can still handle any in-progress source files.
   transpilePackages: ["@pagaska/shared", "@pagaska/upload-engine"],
   experimental: {
-    typedRoutes: false,
+    typedRoutes: true,
   },
   // Don't fail builds on lint warnings during deploy.
   eslint: { ignoreDuringBuilds: true },
