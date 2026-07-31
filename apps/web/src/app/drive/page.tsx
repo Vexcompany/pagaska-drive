@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
-import { api } from "@/lib/api";
+import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
 import { downloadItem } from "@/lib/download";
 import {
   Folder,
@@ -272,14 +272,23 @@ function DriveInner() {
     }
   }
 
-  /** Move selected items to trash (no confirmation). */
+  /** Move selected items to trash (batched, max MAX_BATCH per request). */
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
     try {
-      for (const id of ids) await api.deleteFile(id);
+      const result = await batchOperation(
+        ids,
+        async (chunk) => {
+          const res = await api.trashItems({ fileIds: chunk });
+          return { succeeded: res.trashed, failed: res.failed ?? [] };
+        },
+      );
       setSelected(new Set());
-      showTrashToast(ids, ids.length);
+      if (result.failed.length > 0) {
+        setError(`${result.failed.length} item(s) could not be moved to trash.`);
+      }
+      showTrashToast(result.succeeded, result.succeeded.length);
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
@@ -376,18 +385,35 @@ function DriveInner() {
     }
   }
 
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!shareItem && !renaming && !moveOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShareItem(null);
-        setRenaming(null);
-        setMoveOpen(false);
+      const target = e.target as HTMLElement;
+      const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      const isModal = Boolean(shareItem || renaming || moveOpen);
+      if (isInput || isModal) {
+        // Escape still closes modals when fired from inputs
+        if (e.key === "Escape" && isModal) {
+          e.preventDefault();
+          setShareItem(null);
+          setRenaming(null);
+          setMoveOpen(false);
+        }
+        return;
+      }
+      if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setSelected(new Set(ordered.map((i) => i.id)));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setSelected(new Set());
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        if (selected.size > 0) { e.preventDefault(); void deleteSelected(); }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [shareItem, renaming, moveOpen]);
+  }, [ordered, selected, shareItem, renaming, moveOpen]);
 
   // ── Move ────────────────────────────────────────────────────────────────
 
