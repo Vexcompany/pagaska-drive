@@ -18,6 +18,7 @@ import {
   TriangleAlert,
   Eye,
   Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { api, authHeaders } from "@/lib/api";
@@ -209,7 +210,7 @@ function PreviewInner() {
                 <span className="hidden sm:inline">Download</span>
               </a>
             )}
-            {data?.webViewLink && (
+            {data?.webViewLink && !data.trashed && (
               <a
                 href={data.webViewLink}
                 target="_blank"
@@ -228,6 +229,14 @@ function PreviewInner() {
         {error && <ErrorBanner message={error} />}
         {contentError && <ErrorBanner message={`Content failed to load: ${contentError}`} />}
         {folderError && <ErrorBanner message={folderError} />}
+
+        {/* Trash warning */}
+        {data?.trashed && (
+          <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 mb-4">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>This item is currently in Trash. Sharing and public links are disabled.</span>
+          </div>
+        )}
 
         {/* Skeleton while loading metadata */}
         {!data && !error && (
