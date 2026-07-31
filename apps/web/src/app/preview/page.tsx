@@ -58,13 +58,23 @@ function PreviewInner() {
           {isAudio(data.mimeType) && data.contentUrl && (
             <audio src={data.contentUrl} controls className="w-full" />
           )}
+          {isPdf(data.mimeType) && data.contentUrl && (
+            <iframe src={data.contentUrl} title={data.name} className="w-full h-[70vh] rounded border border-slate-200" />
+          )}
+          {isText(data.mimeType) && data.contentUrl && (
+            <TextPreview url={data.contentUrl} />
+          )}
           {data.thumbnailUrl && !isImage(data.mimeType) && (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={data.thumbnailUrl} alt="" className="max-w-sm rounded mb-3" />
           )}
-          {!isImage(data.mimeType) && !isVideo(data.mimeType) && !isAudio(data.mimeType) && (
-            <p className="text-slate-500">No inline preview available for this file type.</p>
-          )}
+          {!isImage(data.mimeType) &&
+            !isVideo(data.mimeType) &&
+            !isAudio(data.mimeType) &&
+            !isPdf(data.mimeType) &&
+            !isText(data.mimeType) && (
+              <p className="text-slate-500">No inline preview available for this file type — use the download button.</p>
+            )}
           <div className="mt-4 flex gap-2">
             {data.contentUrl && (
               <a className="btn-primary" href={data.contentUrl} download={data.name}>
@@ -88,6 +98,49 @@ function PreviewInner() {
 function isImage(m: string): boolean { return m.startsWith("image/"); }
 function isVideo(m: string): boolean { return m.startsWith("video/"); }
 function isAudio(m: string): boolean { return m.startsWith("audio/"); }
+function isPdf(m: string): boolean { return m === "application/pdf"; }
+function isText(m: string): boolean {
+  return (
+    m.startsWith("text/") ||
+    m === "application/json" ||
+    m === "application/xml" ||
+    m === "application/javascript"
+  );
+}
+
+/** Fetches the worker-proxied content URL and renders the body as text. */
+function TextPreview({ url }: { url: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setText(null);
+    setError(null);
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then((body) => {
+        if (alive) setText(body);
+      })
+      .catch((err) => {
+        if (alive) setError(err instanceof Error ? err.message : "Failed to load text.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [url]);
+
+  if (error) return <p className="text-sm text-red-600">{error}</p>;
+  if (text == null) return <p className="text-slate-400">Loading text…</p>;
+  return (
+    <pre className="whitespace-pre-wrap break-words bg-slate-50 rounded p-3 max-h-[70vh] overflow-auto text-sm">
+      {text}
+    </pre>
+  );
+}
 
 function formatSize(bytes: number | null | undefined): string {
   if (bytes == null || !Number.isFinite(bytes)) return "—";
