@@ -20,6 +20,14 @@ import type {
   ShareStatusResponse,
   StartUploadRequest,
   StartUploadResponse,
+  TrashDeleteForeverRequest,
+  TrashDeleteForeverResponse,
+  TrashListResponse,
+  TrashRequest,
+  TrashResponse,
+  TrashRestoreRequest,
+  TrashRestoreResponse,
+  TrashSearchResponse,
   Workspace,
 } from "@pagaska/shared";
 
@@ -65,7 +73,6 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
       },
     });
   } catch (err) {
-    // Network-level failure: no HTTP status at all.
     throw new ApiError(0, "INTERNAL_ERROR", err instanceof Error ? err.message : "Network error.");
   }
   if (!res.ok) {
@@ -100,6 +107,7 @@ export const api = {
   async createFolder(req: CreateFolderRequest): Promise<{ folder: DriveFolder }> {
     return call("/folders", { method: "POST", body: JSON.stringify(req) });
   },
+  /** Move to trash (replaces the old permanent delete). */
   async deleteFile(id: string): Promise<{ ok: true }> {
     return call(`/files/${id}`, { method: "DELETE" });
   },
@@ -110,8 +118,6 @@ export const api = {
     return call("/upload/start", { method: "POST", body: JSON.stringify(req) });
   },
   async finishUpload(req: FinishUploadRequest): Promise<FinishUploadResponse> {
-    // The engine has already finalized the upload via the session URI;
-    // we hit /upload/finish to confirm the file is visible to the user.
     const fileId = await readFileIdFromSession(req.sessionUri);
     return call<FinishUploadResponse>("/upload/finish", { method: "POST", body: JSON.stringify({ fileId }) });
   },
@@ -131,20 +137,33 @@ export const api = {
   async move(req: MoveRequest): Promise<MoveResponse> {
     return call<MoveResponse>("/move", { method: "POST", body: JSON.stringify(req) });
   },
+
+  // ── Trash ──────────────────────────────────────────────────────────────
+
+  /** List all trashed items in the workspace. */
+  async listTrash(): Promise<TrashListResponse> {
+    return call<TrashListResponse>("/trash");
+  },
+  /** Move items to trash (batch). */
+  async trashItems(req: TrashRequest): Promise<TrashResponse> {
+    return call<TrashResponse>("/trash", { method: "POST", body: JSON.stringify(req) });
+  },
+  /** Restore items from trash (batch). */
+  async restoreItems(req: TrashRestoreRequest): Promise<TrashRestoreResponse> {
+    return call<TrashRestoreResponse>("/trash/restore", { method: "POST", body: JSON.stringify(req) });
+  },
+  /** Permanently delete items ("Delete Forever"). */
+  async deleteForever(req: TrashDeleteForeverRequest): Promise<TrashDeleteForeverResponse> {
+    return call<TrashDeleteForeverResponse>("/trash", { method: "DELETE", body: JSON.stringify(req) });
+  },
+  /** Search within trashed items. */
+  async searchTrash(q: string): Promise<TrashSearchResponse> {
+    return call<TrashSearchResponse>(`/trash/search?q=${encodeURIComponent(q)}`);
+  },
 };
 
 export { TOKEN_KEY, WORKSPACE_KEY };
 
-/**
- * The engine hands us back the Drive session URI after the final chunk.
- * We need the resulting file id, which is on the final 200/201 response.
- * For simplicity, we ask the user to refresh after a moment — but in
- * practice the engine captures the file id internally. We use a small
- * helper that asks the server to look it up.
- */
 async function readFileIdFromSession(_sessionUri: string): Promise<string> {
-  // The Worker exposes a /upload/finish convenience endpoint that
-  // expects the file id. The engine returns it in its own internal
-  // callback, so this helper is overridden in the upload client.
   return "";
 }
