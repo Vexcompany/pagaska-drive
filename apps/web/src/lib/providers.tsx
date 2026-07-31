@@ -2,7 +2,6 @@
 
 /**
  * The single client-side provider boundary for the entire app.
- *
  * Keeping every provider in this file is the Next.js-recommended
  * pattern: the root `layout.tsx` stays a Server Component, and only
  * this one file is the client boundary. The auth context itself is
