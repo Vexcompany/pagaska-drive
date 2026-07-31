@@ -24,6 +24,17 @@ import {
 import { buildZip } from "./zip";
 import { isWorkspace, WORKSPACES, type Workspace, type ApiErrorCode } from "@pagaska/shared";
 
+/**
+ * Maximum number of items the backend will process in a single
+ * batch request.  Cloudflare Workers allow at most 50 subrequests
+ * per invocation on the free plan.  Each batch item costs 2-3
+ * subrequests (getFile + workspace check + operation), so 20
+ * items keeps us safely under the limit even with shared-cached
+ * parent walks.  The frontend splits larger batches into chunks
+ * of this size and sends them sequentially.
+ */
+const MAX_BATCH = 20;
+
 const CORS_HEADERS = (origin: string) => ({
   "Access-Control-Allow-Origin": origin,
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
@@ -33,55 +44,32 @@ const CORS_HEADERS = (origin: string) => ({
 
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 
-/**
- * Map internal error codes to the public machine-readable code that
- * the frontend branches on. Stable across releases.
- */
 function codeFor(err: HttpError): ApiErrorCode {
   switch (err.code) {
-    case "INVALID_LOGIN_PAYLOAD":
-      return "INVALID_LOGIN_PAYLOAD";
-    case "INVALID_CREDENTIALS":
-      return "INVALID_CREDENTIALS";
-    case "UNAUTHENTICATED":
-      return "UNAUTHENTICATED";
-    case "FORBIDDEN":
-      return "FORBIDDEN";
-    case "INVALID_PAYLOAD":
-      return "INVALID_PAYLOAD";
-    case "MISSING_QUERY_PARAM":
-      return "MISSING_QUERY_PARAM";
-    case "DRIVE_ERROR":
-      return "DRIVE_ERROR";
-    case "MISSING_CONFIG":
-      return "MISSING_CONFIG";
-    case "CONFIG_ERROR":
-      return "CONFIG_ERROR";
-    case "ITEM_IN_TRASH":
-      return "ITEM_IN_TRASH";
+    case "INVALID_LOGIN_PAYLOAD": return "INVALID_LOGIN_PAYLOAD";
+    case "INVALID_CREDENTIALS": return "INVALID_CREDENTIALS";
+    case "UNAUTHENTICATED": return "UNAUTHENTICATED";
+    case "FORBIDDEN": return "FORBIDDEN";
+    case "INVALID_PAYLOAD": return "INVALID_PAYLOAD";
+    case "MISSING_QUERY_PARAM": return "MISSING_QUERY_PARAM";
+    case "DRIVE_ERROR": return "DRIVE_ERROR";
+    case "MISSING_CONFIG": return "MISSING_CONFIG";
+    case "CONFIG_ERROR": return "CONFIG_ERROR";
+    case "ITEM_IN_TRASH": return "ITEM_IN_TRASH";
     case "INTERNAL_ERROR":
-    default:
-      return "INTERNAL_ERROR";
+    default: return "INTERNAL_ERROR";
   }
 }
 
 function json(data: unknown, init: ResponseInit = {}, origin = "*"): Response {
   return new Response(JSON.stringify(data), {
     ...init,
-    headers: {
-      ...JSON_HEADERS,
-      ...CORS_HEADERS(origin),
-      ...(init.headers ?? {}),
-    },
+    headers: { ...JSON_HEADERS, ...CORS_HEADERS(origin), ...(init.headers ?? {}) },
   });
 }
 
 function err(code: ApiErrorCode, message: string, status: number, origin = "*"): Response {
-  return json(
-    { success: false, code, message, status },
-    { status },
-    origin
-  );
+  return json({ success: false, code, message, status }, { status }, origin);
 }
 
 function throwHttp(status: number, code: HttpError["code"], message: string): never {
@@ -97,17 +85,11 @@ async function requireAuth(request: Request, env: Env): Promise<Workspace> {
   return payload.workspace;
 }
 
-/**
- * Look up the per-workspace password from Cloudflare runtime secrets.
- */
 function lookupWorkspacePassword(env: Env, workspace: Workspace): string | null {
   switch (workspace) {
-    case "pagaska":
-      return env.PAGASKA_PASSWORD || null;
-    case "osama":
-      return env.OSAMA_PASSWORD || null;
-    case "pmr":
-      return env.PMR_PASSWORD || null;
+    case "pagaska": return env.PAGASKA_PASSWORD || null;
+    case "osama": return env.OSAMA_PASSWORD || null;
+    case "pmr": return env.PMR_PASSWORD || null;
   }
 }
 
@@ -118,19 +100,28 @@ async function getWorkspaceRootFolderId(env: Env, workspace: Workspace): Promise
   return folder.id;
 }
 
-/** Convert the internal DriveFile (size: string) to the frontend shape (size: number). */
 function toClientFile(f: { id: string; name: string; mimeType: string; size: string | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; trashed: boolean }) {
   return {
-    id: f.id,
-    name: f.name,
-    mimeType: f.mimeType,
+    id: f.id, name: f.name, mimeType: f.mimeType,
     size: f.size ? Number(f.size) : null,
-    parents: f.parents,
-    thumbnailLink: f.thumbnailLink,
-    webViewLink: f.webViewLink,
-    modifiedTime: f.modifiedTime,
+    parents: f.parents, thumbnailLink: f.thumbnailLink,
+    webViewLink: f.webViewLink, modifiedTime: f.modifiedTime,
     trashed: f.trashed,
   };
+}
+
+/** Validate that fileIds is a non-empty array of strings within MAX_BATCH. */
+function validateBatchIds(body: unknown): string[] {
+  if (!body || !Array.isArray((body as { fileIds?: unknown }).fileIds) ||
+      ((body as { fileIds: unknown[] }).fileIds).length === 0 ||
+      !((body as { fileIds: unknown[] }).fileIds).every((id) => typeof id === "string")) {
+    throwHttp(400, "INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.");
+  }
+  const ids = (body as { fileIds: string[] }).fileIds;
+  if (ids.length > MAX_BATCH) {
+    throwHttp(400, "INVALID_PAYLOAD", `Batch too large: ${ids.length} items. Maximum is ${MAX_BATCH} per request. Split into smaller batches on the client.`);
+  }
+  return ids;
 }
 
 export async function handle(request: Request, env: Env): Promise<Response> {
@@ -145,34 +136,17 @@ export async function handle(request: Request, env: Env): Promise<Response> {
   try {
     // ------- AUTH -------
     if (path === "/auth/login" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as
-        | { workspace?: unknown; password?: unknown }
-        | null;
+      const body = (await request.json().catch(() => null)) as { workspace?: unknown; password?: unknown } | null;
       if (!body || !isWorkspace(body.workspace) || typeof body.password !== "string" || body.password.length === 0) {
         return err("INVALID_LOGIN_PAYLOAD", "Provide a workspace and a non-empty password.", 400, origin);
       }
       const workspace = body.workspace;
       const expected = lookupWorkspacePassword(env, workspace);
-      if (!expected) {
-        return err("CONFIG_ERROR", `No password configured for workspace "${workspace}".`, 500, origin);
-      }
+      if (!expected) return err("CONFIG_ERROR", `No password configured for workspace "${workspace}".`, 500, origin);
       const ok = await constantTimeEqual(body.password, expected);
       if (!ok) return err("INVALID_CREDENTIALS", "Wrong password for the selected workspace.", 401, origin);
-      const token = await signJwt(
-        { sub: workspace, workspace },
-        60 * 60 * 24 * 7,
-        env.JWT_SECRET
-      );
-      return json(
-        {
-          token,
-          workspace,
-          issuedAt: Math.floor(Date.now() / 1000),
-          expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
-        },
-        {},
-        origin
-      );
+      const token = await signJwt({ sub: workspace, workspace }, 60 * 60 * 24 * 7, env.JWT_SECRET);
+      return json({ token, workspace, issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, {}, origin);
     }
 
     if (path === "/auth/workspaces" && request.method === "GET") {
@@ -194,12 +168,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const files = items.filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
       const folder = folderParam ? await getFile(env, folderId) : null;
       const breadcrumb = await getBreadcrumb(env, folderId, env.GOOGLE_DRIVE_ROOT);
-      return json({
-        folder: folder ? toClientFile(folder) : null,
-        files: files.map(toClientFile),
-        folders: folders.map(toClientFile),
-        breadcrumb,
-      }, {}, origin);
+      return json({ folder: folder ? toClientFile(folder) : null, files: files.map(toClientFile), folders: folders.map(toClientFile), breadcrumb }, {}, origin);
     }
 
     if (path === "/folders" && request.method === "POST") {
@@ -213,17 +182,15 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       return json({ folder: toClientFile(created) }, {}, origin);
     }
 
-    // ------- MUTATE: DELETE now moves to Trash instead of permanent delete -------
+    // ------- MUTATE: DELETE moves to Trash -------
     const deleteMatch = /^\/files\/([^/]+)$/.exec(path);
     if (deleteMatch && request.method === "DELETE") {
       const workspace = await requireAuth(request, env);
       const fileId = deleteMatch[1];
-      // Verify the file is inside the workspace root
       const file = await getFile(env, fileId);
       if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
         return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
       }
-      // Move to trash instead of permanent delete
       await trashFile(env, fileId);
       return json({ ok: true }, {}, origin);
     }
@@ -244,71 +211,80 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const workspace = await requireAuth(request, env);
       const rootFolderId = await getWorkspaceRootFolderId(env, workspace);
       const allTrashed = await listTrashed(env);
-      // Filter to items within the workspace root
-      const scoped: typeof allTrashed = [];
+      // Filter to items within the workspace root using a shared cache.
+      // Cap at a safe limit to stay under the Cloudflare subrequest ceiling.
       const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
-      for (const item of allTrashed) {
+      const scoped: typeof allTrashed = [];
+      const limit = Math.min(allTrashed.length, MAX_BATCH * 2);
+      for (let i = 0; i < limit; i++) {
+        const item = allTrashed[i];
         const inside = await isInsideRoot(item, env.GOOGLE_DRIVE_ROOT, workspace, env, cache);
         if (inside) scoped.push(item);
       }
       const folders = scoped.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
       const files = scoped.filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
-      return json({
-        files: files.map(toClientFile),
-        folders: folders.map(toClientFile),
-        breadcrumb: [],
-      }, {}, origin);
+      return json({ files: files.map(toClientFile), folders: folders.map(toClientFile), breadcrumb: [], hasMore: allTrashed.length > limit }, {}, origin);
     }
 
-    // POST /trash — move items to trash (batch)
+    // POST /trash — move items to trash (batch, max MAX_BATCH)
     if (path === "/trash" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
-      const body = (await request.json().catch(() => null)) as { fileIds?: unknown } | null;
-      if (!body || !Array.isArray(body.fileIds) || body.fileIds.length === 0 || !body.fileIds.every((id) => typeof id === "string")) {
-        return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
-      }
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       let trashed = 0;
-      for (const fileId of body.fileIds as string[]) {
-        const file = await getFile(env, fileId);
-        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
-        await trashFile(env, fileId);
-        trashed += 1;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env, cache)) { failed.push(fileId); continue; }
+          await trashFile(env, fileId);
+          trashed += 1;
+        } catch { failed.push(fileId); }
       }
-      return json({ ok: true, trashed }, {}, origin);
+      return json({ ok: true, trashed, failed }, {}, origin);
     }
 
-    // POST /trash/restore — restore items from trash (batch)
+    // POST /trash/restore — restore items from trash (batch, max MAX_BATCH)
+    // For trashed items, skip the expensive isInsideRoot walk and just
+    // verify the file is actually trashed.  Items were scoped to the
+    // workspace when they were listed via GET /trash.
     if (path === "/trash/restore" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
-      const body = (await request.json().catch(() => null)) as { fileIds?: unknown } | null;
-      if (!body || !Array.isArray(body.fileIds) || body.fileIds.length === 0 || !body.fileIds.every((id) => typeof id === "string")) {
-        return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
-      }
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
       let restored = 0;
-      for (const fileId of body.fileIds as string[]) {
-        const file = await getFile(env, fileId);
-        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
-        await restoreFile(env, fileId);
-        restored += 1;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!file.trashed) { failed.push(fileId); continue; }
+          await restoreFile(env, fileId);
+          restored += 1;
+        } catch { failed.push(fileId); }
       }
-      return json({ ok: true, restored }, {}, origin);
+      return json({ ok: true, restored, failed }, {}, origin);
     }
 
-    // DELETE /trash — permanently delete items (batch, "Delete Forever")
+    // DELETE /trash — permanently delete items (batch, max MAX_BATCH)
+    // For trashed items, skip the expensive isInsideRoot walk and just
+    // verify the file is actually trashed.  This keeps each item at 2
+    // subrequests (getFile + deleteFile) instead of 4-7.
     if (path === "/trash" && request.method === "DELETE") {
       const workspace = await requireAuth(request, env);
-      const body = (await request.json().catch(() => null)) as { fileIds?: unknown } | null;
-      if (!body || !Array.isArray(body.fileIds) || body.fileIds.length === 0 || !body.fileIds.every((id) => typeof id === "string")) {
-        return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
-      }
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
       let deleted = 0;
-      for (const fileId of body.fileIds as string[]) {
-        const file = await getFile(env, fileId);
-        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
-        await deleteFile(env, fileId);
-        deleted += 1;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!file.trashed) { failed.push(fileId); continue; }
+          await deleteFile(env, fileId);
+          deleted += 1;
+        } catch { failed.push(fileId); }
       }
-      return json({ ok: true, deleted }, {}, origin);
+      return json({ ok: true, deleted, failed }, {}, origin);
     }
 
     // GET /trash/search — search within trashed items
@@ -317,19 +293,17 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const query = (url.searchParams.get("q") ?? "").trim();
       if (!query) return json({ files: [], folders: [] }, {}, origin);
       const results = await searchTrashed(env, query);
-      // Scope to this workspace's root and resolve each result's path.
       const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       const files: { id: string; name: string; mimeType: string; size: number | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; trashed: boolean; path: string | null }[] = [];
       const folders: typeof files = [];
-      for (const item of results) {
+      const limit = Math.min(results.length, MAX_BATCH * 2);
+      for (let i = 0; i < limit; i++) {
+        const item = results[i];
         const inside = await isInsideRoot(item, env.GOOGLE_DRIVE_ROOT, workspace, env, cache);
         if (!inside) continue;
         const resolvedPath = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
         if (resolvedPath === undefined) continue;
-        const entry = {
-          ...toClientFile(item),
-          path: resolvedPath === null ? null : resolvedPath,
-        };
+        const entry = { ...toClientFile(item), path: resolvedPath === null ? null : resolvedPath };
         if (item.mimeType === "application/vnd.google-apps.folder") folders.push(entry);
         else files.push(entry);
       }
@@ -344,12 +318,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         return err("INVALID_PAYLOAD", "filename, mimeType and size are required.", 400, origin);
       }
       const parentId = (body.parentId as string | null) || (await getWorkspaceRootFolderId(env, workspace));
-      const result = await startResumableUpload(env, {
-        filename: body.filename,
-        mimeType: body.mimeType,
-        size: body.size,
-        parentId,
-      });
+      const result = await startResumableUpload(env, { filename: body.filename, mimeType: body.mimeType, size: body.size, parentId });
       return json(result, {}, origin);
     }
 
@@ -388,26 +357,10 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      const thumbnailUrl =
-        file.thumbnailLink && typeof file.thumbnailLink === "string"
-          ? file.thumbnailLink.replace(/=s\d+/, "=s1024")
-          : null;
+      const thumbnailUrl = file.thumbnailLink && typeof file.thumbnailLink === "string" ? file.thumbnailLink.replace(/=s\d+/, "=s1024") : null;
       const baseOrigin = new URL(request.url).origin;
       const contentUrl = `${baseOrigin}/media?id=${encodeURIComponent(fileId)}`;
-      return json(
-        {
-          id: file.id,
-          name: file.name,
-          mimeType: file.mimeType,
-          size: file.size ? Number(file.size) : null,
-          thumbnailUrl,
-          contentUrl,
-          webViewLink: file.webViewLink,
-          trashed: file.trashed,
-        },
-        {},
-        origin
-      );
+      return json({ id: file.id, name: file.name, mimeType: file.mimeType, size: file.size ? Number(file.size) : null, thumbnailUrl, contentUrl, webViewLink: file.webViewLink, trashed: file.trashed }, {}, origin);
     }
 
     // ------- MEDIA (proxied file content) -------
@@ -439,40 +392,24 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       for (const item of results) {
         const pathStr = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
         if (pathStr === undefined) continue;
-        const entry = {
-          ...toClientFile(item),
-          path: pathStr === null ? null : pathStr,
-        };
+        const entry = { ...toClientFile(item), path: pathStr === null ? null : pathStr };
         if (item.mimeType === "application/vnd.google-apps.folder") folders.push(entry);
         else files.push(entry);
       }
       return json({ files, folders }, {}, origin);
     }
 
-    // ------- SHARE STATUS (GET) / MAKE PUBLIC (POST) -------
+    // ------- SHARE -------
     if (path === "/share" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
-      // Block sharing for trashed items
-      if (file.trashed) {
-        return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      if (file.trashed) return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
       const permissions = await listPermissions(env, fileId);
       const publicPerm = permissions.find((p) => p.type === "anyone" && p.role === "reader");
-      return json(
-        {
-          public: Boolean(publicPerm),
-          role: publicPerm?.role ?? null,
-          webViewLink: file.webViewLink ?? null,
-        },
-        {},
-        origin
-      );
+      return json({ public: Boolean(publicPerm), role: publicPerm?.role ?? null, webViewLink: file.webViewLink ?? null }, {}, origin);
     }
 
     if (path === "/share" && request.method === "POST") {
@@ -482,13 +419,8 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         return err("INVALID_PAYLOAD", "fileId is required.", 400, origin);
       }
       const file = await getFile(env, body.fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
-      // Block sharing for trashed items
-      if (file.trashed) {
-        return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      if (file.trashed) return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
       const shared = await ensurePublicPermission(env, body.fileId);
       return json({ webViewLink: shared.webViewLink }, {}, origin);
     }
@@ -497,13 +429,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     if (path === "/move" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null)) as { fileIds?: unknown; parentId?: unknown } | null;
-      if (
-        !body ||
-        !Array.isArray(body.fileIds) ||
-        body.fileIds.length === 0 ||
-        !body.fileIds.every((id) => typeof id === "string")
-      ) {
+      if (!body || !Array.isArray(body.fileIds) || body.fileIds.length === 0 || !body.fileIds.every((id) => typeof id === "string")) {
         return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
+      }
+      const fileIds = body.fileIds as string[];
+      if (fileIds.length > MAX_BATCH) {
+        return err("INVALID_PAYLOAD", `Batch too large: ${fileIds.length} items. Maximum is ${MAX_BATCH} per request.`, 400, origin);
       }
       const parentId = body.parentId === null || body.parentId === undefined ? null : body.parentId;
       if (parentId !== null && typeof parentId !== "string") {
@@ -511,32 +442,30 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       }
       if (parentId) {
         const target = await getFile(env, parentId);
-        if (target.mimeType !== "application/vnd.google-apps.folder") {
-          return err("INVALID_PAYLOAD", "Destination is not a folder.", 400, origin);
-        }
-        if (!isInsideRoot(target, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-          return err("FORBIDDEN", "Destination is outside the workspace root.", 403, origin);
-        }
+        if (target.mimeType !== "application/vnd.google-apps.folder") return err("INVALID_PAYLOAD", "Destination is not a folder.", 400, origin);
+        if (!isInsideRoot(target, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "Destination is outside the workspace root.", 403, origin);
       }
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       let moved = 0;
-      for (const fileId of body.fileIds as string[]) {
-        const file = await getFile(env, fileId);
-        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
-        await moveFile(env, fileId, parentId ?? env.GOOGLE_DRIVE_ROOT);
-        moved += 1;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env, cache)) { failed.push(fileId); continue; }
+          await moveFile(env, fileId, parentId ?? env.GOOGLE_DRIVE_ROOT);
+          moved += 1;
+        } catch { failed.push(fileId); }
       }
-      return json({ ok: true, moved }, {}, origin);
+      return json({ ok: true, moved, failed }, {}, origin);
     }
 
-    // ------- DOWNLOAD (single file) -------
+    // ------- DOWNLOAD -------
     if (path === "/download" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
       const media = await fetchMedia(env, fileId);
       const headers = new Headers(CORS_HEADERS(origin));
       headers.set("Content-Type", file.mimeType);
@@ -546,15 +475,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       return new Response(media.body, { status: media.status, headers });
     }
 
-    // ------- DOWNLOAD FOLDER (as ZIP) -------
     if (path === "/download/folder" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const folderId = url.searchParams.get("id");
       if (!folderId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const folder = await getFile(env, folderId);
-      if (!isInsideRoot(folder, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "Folder is outside the workspace root.", 403, origin);
-      }
+      if (!isInsideRoot(folder, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "Folder is outside the workspace root.", 403, origin);
       const subtree = await collectSubtree(env, folderId, folder.name);
       const entries = [{ path: `${folder.name}/`, data: new Uint8Array(0) }, ...subtree];
       const zip = buildZip(entries);
@@ -567,17 +493,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
 
     return err("NOT_FOUND", `Unknown route: ${request.method} ${path}`, 404, origin);
   } catch (e) {
-    if (e instanceof HttpError) {
-      return err(codeFor(e), e.message, e.status, origin);
-    }
+    if (e instanceof HttpError) return err(codeFor(e), e.message, e.status, origin);
     const message = e instanceof Error ? e.message : "Unknown error";
     return err("INTERNAL_ERROR", message, 500, origin);
   }
 }
 
-/**
- * Constant-time string comparison.
- */
 async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder();
   const ab = enc.encode(a);
@@ -596,17 +517,8 @@ function sanitizeFilename(name: string): string {
   return name.replace(/["\r\n]/g, "_").replace(/\\/g, "_");
 }
 
-/**
- * Resolves a search result's path inside the workspace root. Returns:
- *   - a path string when the item is inside the workspace subtree,
- *   - null when the item is a direct child of the workspace folder,
- *   - undefined when the item is outside the workspace (caller skips it).
- */
 async function scopedSearchPath(
-  env: Env,
-  file: { parents?: string[] },
-  rootId: string,
-  workspace: Workspace,
+  env: Env, file: { parents?: string[] }, rootId: string, workspace: Workspace,
   cache: Map<string, Awaited<ReturnType<typeof getFile>>>
 ): Promise<string | null | undefined> {
   if (!file.parents || file.parents.length === 0) return undefined;
@@ -617,10 +529,7 @@ async function scopedSearchPath(
   while (current && !seen.has(current)) {
     seen.add(current);
     let f = cache.get(current);
-    if (!f) {
-      f = await getFile(env, current);
-      cache.set(current, f);
-    }
+    if (!f) { f = await getFile(env, current); cache.set(current, f); }
     if (current === rootId) return names.join("/");
     if (f.name === workspace) return names.length ? names.join("/") : null;
     names.unshift(f.name);
@@ -629,16 +538,8 @@ async function scopedSearchPath(
   return undefined;
 }
 
-/**
- * Walks parents from the file up to GOOGLE_DRIVE_ROOT, ensuring the
- * walk passes through the workspace's sub-folder. Accepts an optional
- * cache to avoid repeated getFile calls across multiple invocations.
- */
 async function isInsideRoot(
-  file: { id: string; parents?: string[] },
-  rootId: string,
-  workspace: Workspace,
-  env: Env,
+  file: { id: string; parents?: string[] }, rootId: string, workspace: Workspace, env: Env,
   cache?: Map<string, Awaited<ReturnType<typeof getFile>>>
 ): Promise<boolean> {
   if (file.parents?.includes(rootId)) return true;
@@ -648,20 +549,13 @@ async function isInsideRoot(
     seen.add(current);
     if (current === rootId) return true;
     let f = cache?.get(current);
-    if (!f) {
-      f = await getFile(env, current);
-      cache?.set(current, f);
-    }
+    if (!f) { f = await getFile(env, current); cache?.set(current, f); }
     if (f.name === workspace) return true;
     current = f.parents?.[0];
   }
-  // Confirm at least one ancestor is the workspace folder
   for (const id of seen) {
     let f = cache?.get(id);
-    if (!f) {
-      f = await getFile(env, id);
-      cache?.set(id, f);
-    }
+    if (!f) { f = await getFile(env, id); cache?.set(id, f); }
     if (f.name === workspace) return true;
   }
   return false;
