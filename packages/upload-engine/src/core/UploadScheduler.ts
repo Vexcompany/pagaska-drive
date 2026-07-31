@@ -1,4 +1,4 @@
-import type { Logger, QueuedFile, UploadEngineConfig, UploadError } from "../types";
+import { UploadError, type Logger, type QueuedFile, type UploadEngineConfig } from "../types";
 import { computeBackoffMs, sleep } from "../utils/backoff";
 import type { QueueManager } from "./QueueManager";
 import type { RetryManager } from "./RetryManager";
@@ -266,6 +266,18 @@ export class UploadScheduler {
         accessToken,
         file.bytesUploaded
       );
+      // Completion guard: if the server acknowledged no new bytes for this
+      // chunk, the `while (true)` loop below would otherwise re-upload the
+      // identical chunk forever, leaving the file stuck in "uploading" and
+      // the queue blocked. Surface a recoverable failure so the existing
+      // retry/backoff machinery can re-anchor or fail the file once its
+      // retry budget is exhausted.
+      if (result.acknowledged <= file.bytesUploaded) {
+        throw new UploadError(
+          `Server made no progress on chunk ${chunk.start}-${chunk.end} (acknowledged ${result.acknowledged} of ${file.source.size} bytes)`,
+          { recoverable: true, status: 409 }
+        );
+      }
       this.queue.setBytesUploaded(file.id, result.acknowledged);
       this.sessions.setBytesUploaded(file.id, result.acknowledged);
       this.queue.recordSpeedSample(file.id, result.acknowledged);
