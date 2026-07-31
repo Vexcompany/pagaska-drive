@@ -1023,3 +1023,4 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
     </div>
   );
 }
+
