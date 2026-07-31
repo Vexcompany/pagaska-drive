@@ -629,3 +629,4 @@ function SkeletonList({ view }: { view: ViewMode }) {
     </div>
   );
 }
+
