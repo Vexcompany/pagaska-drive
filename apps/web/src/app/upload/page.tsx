@@ -44,6 +44,17 @@ export default function UploadPage() {
     };
   }, [workspace, folderId]);
 
+  // Upload session finished: every file is completed, so leave the
+  // upload page and return to the drive. This intentionally reacts to
+  // the global snapshot (not the per-file rows), which the engine only
+  // emits once all files have reached their terminal state.
+  useEffect(() => {
+    if (!snapshot) return;
+    if (snapshot.totalFiles > 0 && snapshot.uploadedFiles === snapshot.totalFiles) {
+      router.push("/drive");
+    }
+  }, [snapshot, router]);
+
   const handleFiles = useCallback(
     async (rawFiles: File[]) => {
       if (!engineRef.current) return;
