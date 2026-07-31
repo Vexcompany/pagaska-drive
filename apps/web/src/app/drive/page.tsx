@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
@@ -63,6 +63,7 @@ type SortDir = "asc" | "desc";
 const VIEW_KEY = "pagaska.view";
 const SORT_KEY = "pagaska.sortKey";
 const SORT_DIR_KEY = "pagaska.sortDir";
+const SCROLL_KEY = "pagaska.scrollY";
 
 function readLocal<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -75,9 +76,25 @@ function readLocal<T>(key: string, fallback: T): T {
 }
 
 export default function DrivePage() {
+  return (
+    <Suspense fallback={
+      <main className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-brand-400" />
+      </main>
+    }>
+      <DriveInner />
+    </Suspense>
+  );
+}
+
+function DriveInner() {
   const { workspace, loading, logout } = useAuth();
   const router = useRouter();
-  const [folderId, setFolderId] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+
+  // Read folderId from URL – null means root
+  const folderId = useMemo(() => searchParams.get("folderId") ?? null, [searchParams]);
+
   const [data, setData] = useState<ListFilesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
@@ -110,6 +127,27 @@ export default function DrivePage() {
   const [moveCrumbs, setMoveCrumbs] = useState<{ id: string; name: string }[]>([]);
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // ── Helpers: URL-based navigation ───────────────────────────────────────
+
+  /** Navigate to a folder by pushing a new URL entry (creates browser history). */
+  function navigateToFolder(id: string | null) {
+    router.push(id ? `/drive?folderId=${id}` : "/drive");
+  }
+
+  /** Open a file preview, preserving folder context and scroll position. */
+  function openItem(item: DriveFile) {
+    if (item.mimeType === "application/vnd.google-apps.folder") {
+      navigateToFolder(item.id);
+    } else {
+      // Save scroll position so the preview back-button can restore it
+      try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch { /* */ }
+      const folderParam = folderId ? `&folderId=${encodeURIComponent(folderId)}` : "";
+      router.push(`/preview?id=${encodeURIComponent(item.id)}${folderParam}`);
+    }
+  }
+
+  // ── Data fetching ───────────────────────────────────────────────────────
+
   const refresh = useCallback(async (id: string | null) => {
     setLoadingFiles(true);
     try {
@@ -129,6 +167,18 @@ export default function DrivePage() {
   useEffect(() => {
     if (workspace) void refresh(folderId);
   }, [workspace, folderId, refresh]);
+
+  // ── Restore scroll position when returning from preview ─────────────────
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SCROLL_KEY);
+      if (saved != null) {
+        sessionStorage.removeItem(SCROLL_KEY);
+        const y = Number(saved);
+        if (Number.isFinite(y)) window.scrollTo(0, y);
+      }
+    } catch { /* */ }
+  }, []);
 
   useEffect(() => {
     try {
@@ -169,6 +219,8 @@ export default function DrivePage() {
   }, [results, data, sortKey, sortDir]);
 
   const ordered = useMemo(() => [...folders, ...files], [folders, files]);
+
+  // ── Actions ─────────────────────────────────────────────────────────────
 
   async function createFolder() {
     if (!newFolderName.trim()) return;
@@ -228,6 +280,8 @@ export default function DrivePage() {
     }
   }
 
+  // ── Selection ───────────────────────────────────────────────────────────
+
   function toggleSelect(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -246,15 +300,14 @@ export default function DrivePage() {
     setSelected(new Set(ids.slice(lo, hi + 1)));
   }
 
-  function handleItemClick(e: React.MouseEvent, item: DriveFile, index: number) {
+  /** Click on a row (not on filename or checkbox) – selects, never navigates. */
+  function handleRowClick(e: React.MouseEvent, item: DriveFile, index: number) {
     if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleSelect(item.id); return; }
     if (e.shiftKey && lastClicked.current) { e.preventDefault(); selectRange(lastClicked.current, item.id); return; }
-    if (item.mimeType === "application/vnd.google-apps.folder") {
-      setFolderId(item.id);
-    } else {
-      router.push(`/preview?id=${item.id}`);
-    }
+    toggleSelect(item.id);
   }
+
+  // ── Share ───────────────────────────────────────────────────────────────
 
   async function openShare(item: DriveFile) {
     setShareItem(item);
@@ -307,6 +360,8 @@ export default function DrivePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [shareItem, renaming, moveOpen]);
 
+  // ── Move ────────────────────────────────────────────────────────────────
+
   function openMove() {
     setMoveTargets([...selected] as string[]);
     setMoveFolderId(null);
@@ -358,7 +413,7 @@ export default function DrivePage() {
           {/* Logo + breadcrumb */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
-              onClick={() => { setFolderId(null); setQuery(""); }}
+              onClick={() => { navigateToFolder(null); setQuery(""); }}
               className="flex items-center gap-2 text-brand-600 hover:text-brand-700 font-semibold shrink-0"
             >
               <House className="h-4 w-4" />
@@ -368,7 +423,7 @@ export default function DrivePage() {
               <span key={c.id} className="flex items-center gap-1 min-w-0">
                 <ChevronRight className="h-3.5 w-3.5 text-slate-300 shrink-0" />
                 <button
-                  onClick={() => setFolderId(c.id)}
+                  onClick={() => navigateToFolder(c.id)}
                   className="text-sm text-slate-600 hover:text-slate-900 truncate max-w-[8rem]"
                 >
                   {c.name}
@@ -612,7 +667,7 @@ export default function DrivePage() {
                     return (
                       <tr
                         key={item.id}
-                        onClick={(e) => handleItemClick(e, item, i)}
+                        onClick={(e) => handleRowClick(e, item, i)}
                         className={`group border-b border-slate-50 last:border-0 cursor-pointer select-none transition-colors duration-100 ${
                           isSel ? "bg-brand-50 hover:bg-brand-100/70" : "hover:bg-slate-50"
                         }`}
@@ -631,7 +686,15 @@ export default function DrivePage() {
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <FileIcon mime={item.mimeType} className="h-4 w-4 shrink-0 text-slate-400" isFolder={isFolder} />
-                            <span className="truncate font-medium text-slate-800">{item.name}</span>
+                            {/* Filename: click opens the item, never selects */}
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                              className="truncate font-medium text-slate-800 hover:text-brand-600 hover:underline text-left"
+                              title={item.name}
+                            >
+                              {item.name}
+                            </button>
                             {isSearching && (item as DriveFile & { path?: string | null }).path && (
                               <span className="text-xs text-slate-400 truncate shrink-0">· {(item as DriveFile & { path?: string | null }).path}</span>
                             )}
@@ -682,7 +745,7 @@ export default function DrivePage() {
                 return (
                   <div
                     key={item.id}
-                    onClick={(e) => handleItemClick(e, item, i)}
+                    onClick={(e) => handleRowClick(e, item, i)}
                     className={`group relative flex flex-col items-center rounded-2xl border p-3 cursor-pointer select-none transition-all duration-150 ${
                       isSel
                         ? "border-brand-300 ring-2 ring-brand-200 bg-brand-50 shadow-sm"
@@ -698,7 +761,13 @@ export default function DrivePage() {
                       onChange={() => toggleSelect(item.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
-                    <div className="h-16 w-16 flex items-center justify-center mb-2">
+                    {/* Thumbnail / icon area: click opens the item */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                      className="h-16 w-16 flex items-center justify-center mb-2 focus:outline-none"
+                      title={item.name}
+                    >
                       {!isFolder && item.thumbnailLink && item.mimeType.startsWith("image/") ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
@@ -710,10 +779,16 @@ export default function DrivePage() {
                       ) : (
                         <FileIconLarge mime={item.mimeType} isFolder={isFolder} />
                       )}
-                    </div>
-                    <div className="text-xs font-medium truncate w-full text-center text-slate-800 leading-tight" title={item.name}>
+                    </button>
+                    {/* Filename: click opens the item */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                      className="text-xs font-medium truncate w-full text-center text-slate-800 hover:text-brand-600 hover:underline leading-tight"
+                      title={item.name}
+                    >
                       {item.name}
-                    </div>
+                    </button>
                     <div className="text-xs text-slate-400 mt-0.5">
                       {isFolder ? "Folder" : formatSize(item.size)}
                     </div>
@@ -1023,4 +1098,3 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
     </div>
   );
 }
-
