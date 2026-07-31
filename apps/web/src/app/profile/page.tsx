@@ -1,48 +1,87 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { PROFILES, type Profile } from "@pagaska/shared";
+import { api, ApiError } from "@/lib/api";
+import { WORKSPACES, type Workspace } from "@pagaska/shared";
 
-export default function ProfilePage() {
-  const { profile, loading, login, logout } = useAuth();
+export default function WorkspaceSwitcherPage() {
+  const { workspace, loading, login, logout } = useAuth();
   const router = useRouter();
+  const [knownWorkspaces, setKnownWorkspaces] = useState<readonly Workspace[]>(WORKSPACES);
+  const [fetching, setFetching] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!loading && !profile) router.replace("/");
-  }, [loading, profile, router]);
+    if (!loading && !workspace) router.replace("/");
+  }, [loading, workspace, router]);
 
-  async function pick(p: Profile) {
-    await login(p, "pagaska");
-    router.replace("/drive");
-  }
+  useEffect(() => {
+    let cancelled = false;
+    setFetching(true);
+    api
+      .listWorkspaces()
+      .then((r) => {
+        if (cancelled) return;
+        if (Array.isArray(r.workspaces) && r.workspaces.length > 0) {
+          setKnownWorkspaces(r.workspaces as readonly Workspace[]);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(
+          err instanceof ApiError
+            ? `Could not load workspaces (${err.code}). Using cached list.`
+            : "Could not load workspaces. Using cached list."
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center p-6">
+    <main className="min-h-screen flex flex-col items-center justify-center p-4 sm:p-6">
       <div className="card w-full max-w-md p-6">
-        <h1 className="text-xl font-semibold">Choose a profile</h1>
-        <p className="text-sm text-slate-500 mb-4">Each profile has its own isolated Drive folder.</p>
-        <div className="grid grid-cols-2 gap-3">
-          {PROFILES.map((p) => (
+        <h1 className="text-xl font-semibold">Choose a workspace</h1>
+        <p className="text-sm text-slate-500 mb-4">
+          Each workspace has its own isolated Drive folder.
+        </p>
+
+        {error && (
+          <p className="mb-3 text-xs text-slate-500" role="status">
+            {error}
+          </p>
+        )}
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {knownWorkspaces.map((w) => (
             <button
-              key={p}
-              onClick={() => pick(p)}
+              key={w}
+              onClick={() => router.push("/")}
               className={`rounded-xl border p-4 text-left transition ${
-                profile === p
+                workspace === w
                   ? "border-brand-500 bg-brand-50"
                   : "border-slate-200 hover:border-slate-300"
               }`}
+              disabled={fetching && !workspace}
             >
-              <div className="text-lg font-semibold capitalize">{p}</div>
+              <div className="text-lg font-semibold capitalize">{w}</div>
               <div className="text-xs text-slate-500">
-                {profile === p ? "current" : "switch to"}
+                {workspace === w ? "current" : "sign in to switch"}
               </div>
             </button>
           ))}
         </div>
+
         <div className="mt-4 flex justify-end">
-          <button onClick={logout} className="btn-ghost text-sm">Sign out</button>
+          <button onClick={logout} className="btn-ghost text-sm">
+            Sign out
+          </button>
         </div>
       </div>
     </main>
