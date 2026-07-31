@@ -37,7 +37,16 @@ function PreviewInner() {
     api.preview(id).then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed."));
   }, [id]);
 
-  if (!id) return <main className="p-6">Missing id.</main>;
+  if (!id) {
+    return (
+      <main className="min-h-screen p-6 max-w-5xl mx-auto text-center py-16">
+        <div className="text-5xl mb-3">👀</div>
+        <p className="text-slate-500 font-medium">Nothing to preview</p>
+        <p className="text-sm text-slate-400 mt-1">No file was selected. Go back to your drive and pick a file.</p>
+        <Link href="/drive" className="btn-ghost mt-4 text-sm">Back to drive</Link>
+      </main>
+    );
+  }
   if (!workspace) return null;
 
   return (
@@ -46,7 +55,14 @@ function PreviewInner() {
         <h1 className="text-xl font-semibold">Preview</h1>
         <Link className="btn-ghost" href="/drive">Back to drive</Link>
       </header>
-      {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
+      {error && (
+        <div className="card p-6 text-center py-12">
+          <div className="text-4xl mb-2">⚠️</div>
+          <p className="text-red-600 font-medium">{error}</p>
+          <p className="text-sm text-slate-400 mt-1">This file could not be previewed.</p>
+          <Link href="/drive" className="btn-ghost mt-4 text-sm">Back to drive</Link>
+        </div>
+      )}
       {contentError && <p className="text-sm text-red-600 mb-2">Content failed to load: {contentError}</p>}
       {data ? (
         <div className="card p-6">
@@ -94,9 +110,13 @@ function PreviewInner() {
             )}
           </div>
         </div>
-      ) : (
-        <p className="text-slate-400">Loading…</p>
-      )}
+      ) : !error ? (
+        <div className="card p-6 space-y-3">
+          <div className="h-6 w-1/3 rounded bg-slate-100 animate-pulse" />
+          <div className="h-4 w-1/4 rounded bg-slate-100 animate-pulse" />
+          <div className="h-72 rounded-xl bg-slate-100 animate-pulse" />
+        </div>
+      ) : null}
     </main>
   );
 }
