@@ -160,6 +160,8 @@ export interface MoveRequest {
 export interface MoveResponse {
   ok: boolean;
   moved: number;
+  /** IDs that could not be moved (partial failure). */
+  failed: string[];
 }
 
 export interface LoginRequest {
@@ -179,6 +181,8 @@ export interface TrashRequest {
 export interface TrashResponse {
   ok: boolean;
   trashed: number;
+  /** IDs that could not be trashed (partial failure). */
+  failed: string[];
 }
 
 export interface TrashRestoreRequest {
@@ -189,6 +193,8 @@ export interface TrashRestoreRequest {
 export interface TrashRestoreResponse {
   ok: boolean;
   restored: number;
+  /** IDs that could not be restored (partial failure). */
+  failed: string[];
 }
 
 export interface TrashDeleteForeverRequest {
@@ -199,6 +205,8 @@ export interface TrashDeleteForeverRequest {
 export interface TrashDeleteForeverResponse {
   ok: boolean;
   deleted: number;
+  /** IDs that could not be permanently deleted (partial failure). */
+  failed: string[];
 }
 
 export interface TrashListResponse {
@@ -206,6 +214,9 @@ export interface TrashListResponse {
   folders: DriveFolder[];
   /** Breadcrumb when navigating inside a trashed folder. */
   breadcrumb: { id: string; name: string }[];
+  /** True when there are more trashed items than could be safely listed
+   *  within the Cloudflare Worker subrequest limit. */
+  hasMore?: boolean;
 }
 
 export interface TrashSearchResponse {
