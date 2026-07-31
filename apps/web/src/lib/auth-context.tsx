@@ -8,13 +8,18 @@
  */
 
 import { createContext, useContext } from "react";
-import type { Profile } from "@pagaska/shared";
+import type { Workspace } from "@pagaska/shared";
 
 export interface AuthState {
-  profile: Profile | null;
+  workspace: Workspace | null;
   token: string | null;
   loading: boolean;
-  login(profile: Profile, passphrase: string): Promise<void>;
+  /**
+   * Sign in to a workspace. Password is sent to the Worker and
+   * validated against a Cloudflare secret; it never leaves the
+   * browser for any other purpose.
+   */
+  login(workspace: Workspace, password: string): Promise<void>;
   logout(): void;
 }
 

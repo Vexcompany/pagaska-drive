@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  ApiErrorCode,
   AuthSession,
   CreateFolderRequest,
   DriveFile,
@@ -10,24 +11,35 @@ import type {
   ListFilesResponse,
   LoginRequest,
   PreviewResponse,
-  Profile,
   RenameRequest,
   StartUploadRequest,
   StartUploadResponse,
+  Workspace,
 } from "@pagaska/shared";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
 
+/**
+ * Structured API error. The Worker always returns
+ * `{success: false, code, message, status}` on the failure path.
+ */
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  readonly status: number;
+  readonly code: ApiErrorCode;
+  constructor(status: number, code: ApiErrorCode, message: string) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.code = code;
   }
 }
 
+const TOKEN_KEY = "pagaska.token";
+const WORKSPACE_KEY = "pagaska.workspace";
+
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem("pagaska.token");
+  return window.localStorage.getItem(TOKEN_KEY);
 }
 
 function authHeaders(): Record<string, string> {
@@ -36,34 +48,45 @@ function authHeaders(): Record<string, string> {
 }
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(),
-      ...(init.headers ?? {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(),
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    // Network-level failure: no HTTP status at all.
+    throw new ApiError(0, "INTERNAL_ERROR", err instanceof Error ? err.message : "Network error.");
+  }
   if (!res.ok) {
+    let code: ApiErrorCode = "INTERNAL_ERROR";
     let message = `HTTP ${res.status}`;
     try {
-      const data = (await res.json()) as { message?: string };
+      const data = (await res.json()) as { code?: ApiErrorCode; message?: string };
+      if (data?.code) code = data.code;
       if (data?.message) message = data.message;
     } catch {
-      /* ignore */
+      /* non-JSON error body */
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, code, message);
   }
   return (await res.json()) as T;
 }
 
 export const api = {
-  async login(profile: Profile, passphrase: string): Promise<AuthSession> {
-    const body: LoginRequest = { profile, passphrase };
+  async login(workspace: Workspace, password: string): Promise<AuthSession> {
+    const body: LoginRequest = { workspace, password };
     return call<AuthSession>("/auth/login", { method: "POST", body: JSON.stringify(body) });
   },
-  async profile(): Promise<{ profile: Profile }> {
+  async profile(): Promise<{ workspace: Workspace }> {
     return call("/auth/profile");
+  },
+  async listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+    return call("/auth/workspaces");
   },
   async listFiles(folderId: string | null = null): Promise<ListFilesResponse> {
     const q = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
@@ -91,6 +114,8 @@ export const api = {
     return call(`/preview?id=${encodeURIComponent(id)}`);
   },
 };
+
+export { TOKEN_KEY, WORKSPACE_KEY };
 
 /**
  * The engine hands us back the Drive session URI after the final chunk.
