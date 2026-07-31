@@ -168,7 +168,32 @@ export default function UploadPage() {
                       <div className="bar"><div style={{ width: `${pct.toFixed(1)}%` }} /></div>
                       <div className="text-xs text-slate-400 mt-1">{formatSize(f.speedBps)}/s</div>
                     </td>
-                    <td className="px-4 py-2 capitalize">{f.state}</td>
+                    <td className="px-4 py-2">
+                      <div className="capitalize">{f.state}</div>
+                      {/*
+                        BUG #7 FIX: surface the underlying error so the
+                        operator can debug. The engine sets `errorMessage`
+                        on every failure; previously this column only
+                        showed the state name ("failed") with no clue
+                        as to why. We render the message inline; if no
+                        message is present we fall back to a short
+                        "no detail" string so the column never looks
+                        empty next to a "failed" state.
+                      */}
+                      {f.state === "failed" && (
+                        <div
+                          className="text-xs text-red-600 mt-1 max-w-xs break-words"
+                          title={f.errorMessage ?? "Upload failed (no error message recorded)."}
+                        >
+                          {f.errorMessage ?? "Upload failed (no error message recorded)."}
+                        </div>
+                      )}
+                      {f.state === "retrying" && (
+                        <div className="text-xs text-amber-600 mt-1">
+                          attempt {(f.attempt ?? 0) + 1}
+                        </div>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-right space-x-1">
                       {f.state === "uploading" || f.state === "retrying" ? (
                         <button className="btn-ghost text-xs" onClick={() => engineRef.current?.pauseFile(f.id)}>pause</button>
