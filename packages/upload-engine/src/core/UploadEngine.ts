@@ -156,11 +156,23 @@ export class UploadEngine {
     this.queue.setState(id, "queued", { errorMessage: null });
     this.queue.setPool(id, null);
     this.queue.setError(id, null, null);
+    // BUG #2 FIX: after a file is re-queued, the normal pool is
+    // asleep in `waitForWake`. Nothing else wakes it (the failure
+    // path now wakes the retry pool, but a manual retry from the
+    // UI goes directly back to the normal pool). Tell the scheduler
+    // to re-scan.
+    this.scheduler.wakeForUserAction();
+    this.progress.tick();
   }
 
   /** Retry every file currently in the `failed` state. */
   retryAllFailed(): number {
     const n = this.queue.resetFailedToQueued();
+    // BUG #2 FIX: same as `retryFile` above — wake the normal pool
+    // so the re-queued files are picked up immediately. Without
+    // this, the buttons read "Retry all failed" but the queue sits
+    // idle until the next user action.
+    this.scheduler.wakeForUserAction();
     this.progress.tick();
     return n;
   }

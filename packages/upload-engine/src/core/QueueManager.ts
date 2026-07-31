@@ -68,14 +68,21 @@ export class QueueManager {
   /**
    * Returns up to `n` files currently in `failed` state. The retry pool
    * pulls from this list.
+   *
+   * BUG #2 / BUG #4 FIX: a file whose retry budget has been exhausted
+   * (`attempt >= maxRetries`) is no longer returned. Without this
+   * guard, the retry pool would pick the file, `runOneWithBackoff`
+   * would short-circuit (marking it failed with the "exhausted"
+   * message), the .finally would wake the retry pool, and the pool
+   * would pick the same file again — creating an infinite busy loop.
    */
-  nextFailed(n: number): QueuedFile[] {
+  nextFailed(n: number, maxRetries: number = Number.POSITIVE_INFINITY): QueuedFile[] {
     const out: QueuedFile[] = [];
     for (const id of this.order) {
       if (out.length >= n) break;
       const f = this.files.get(id);
       if (!f) continue;
-      if (f.state === "failed" && f.pool === null) {
+      if (f.state === "failed" && f.pool === null && f.attempt < maxRetries) {
         out.push(f);
       }
     }
