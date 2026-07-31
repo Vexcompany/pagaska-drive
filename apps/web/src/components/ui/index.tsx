@@ -179,6 +179,80 @@ export function Divider({ className = "" }: { className?: string }) {
 
 // ── ErrorBanner ───────────────────────────────────────────────────────────────
 
+// ── Toast ────────────────────────────────────────────────────────────────────
+
+interface ToastProps {
+  message: string;
+  action?: { label: string; onClick: () => void };
+  onDismiss?: () => void;
+  visible: boolean;
+}
+
+export function Toast({ message, action, onDismiss, visible }: ToastProps) {
+  if (!visible) return null;
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-pop-in">
+      <div className="flex items-center gap-3 rounded-xl bg-slate-900 text-white px-4 py-3 shadow-lg text-sm">
+        <span>{message}</span>
+        {action && (
+          <button
+            onClick={action.onClick}
+            className="font-semibold text-brand-400 hover:text-brand-300 transition-colors whitespace-nowrap"
+          >
+            {action.label}
+          </button>
+        )}
+        {onDismiss && (
+          <button onClick={onDismiss} className="text-slate-400 hover:text-slate-200 ml-1">
+            <XCircle className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── ContextMenu ─────────────────────────────────────────────────────────────
+
+interface ContextMenuProps {
+  x: number;
+  y: number;
+  items: { label: string; icon?: ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }[];
+  onClose: () => void;
+}
+
+export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div
+        className="fixed z-50 min-w-[180px] rounded-xl border border-slate-200 bg-white shadow-xl py-1 animate-pop-in"
+        style={{ left: Math.min(x, window.innerWidth - 200), top: Math.min(y, window.innerHeight - 300) }}
+      >
+        {items.map((item, i) => (
+          <button
+            key={i}
+            onClick={() => { item.onClick(); onClose(); }}
+            disabled={item.disabled}
+            className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 transition-colors ${
+              item.disabled
+                ? "text-slate-300 cursor-not-allowed"
+                : item.danger
+                  ? "text-red-600 hover:bg-red-50"
+                  : "text-slate-700 hover:bg-slate-50"
+            }`}
+          >
+            {item.icon}
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ── ErrorBanner ───────────────────────────────────────────────────────────────
+
 export function ErrorBanner({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
     <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 mb-4">
