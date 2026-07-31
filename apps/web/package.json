@@ -5,7 +5,7 @@
   "description": "Next.js frontend for Pagaska Drive.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "npm run build --workspace @pagaska/shared --workspace @pagaska/upload-engine && next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
