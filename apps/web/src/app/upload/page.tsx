@@ -3,8 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import {
+  ArrowLeft,
+  Upload,
+  Folder,
+  Pause,
+  Play,
+  RotateCcw,
+  X,
+  CloudUpload,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { createEngine, toUploadSources } from "@/lib/engine";
+import { Button, Card, StatusBadge, ProgressBar, ErrorBanner } from "@/components/ui";
 import type { ProgressSnapshot, UploadFileSnapshot, UploadEngine } from "@pagaska/upload-engine";
 
 export default function UploadPage() {
@@ -21,7 +34,6 @@ export default function UploadPage() {
     if (!loading && !workspace) router.replace("/");
   }, [loading, workspace, router]);
 
-  // Construct one engine per page-mount; tear it down on unmount.
   useEffect(() => {
     if (!workspace) return;
     const engine = createEngine({
@@ -38,16 +50,9 @@ export default function UploadPage() {
       },
     });
     engineRef.current = engine;
-    return () => {
-      void engine.stop();
-      engineRef.current = null;
-    };
+    return () => { void engine.stop(); engineRef.current = null; };
   }, [workspace, folderId]);
 
-  // Upload session finished: every file is completed, so leave the
-  // upload page and return to the drive. This intentionally reacts to
-  // the global snapshot (not the per-file rows), which the engine only
-  // emits once all files have reached their terminal state.
   useEffect(() => {
     if (!snapshot) return;
     if (snapshot.totalFiles > 0 && snapshot.uploadedFiles === snapshot.totalFiles) {
@@ -55,16 +60,13 @@ export default function UploadPage() {
     }
   }, [snapshot, router]);
 
-  const handleFiles = useCallback(
-    async (rawFiles: File[]) => {
-      if (!engineRef.current) return;
-      setError(null);
-      const sources = toUploadSources(rawFiles);
-      engineRef.current.addFiles(sources);
-      engineRef.current.start();
-    },
-    []
-  );
+  const handleFiles = useCallback(async (rawFiles: File[]) => {
+    if (!engineRef.current) return;
+    setError(null);
+    const sources = toUploadSources(rawFiles);
+    engineRef.current.addFiles(sources);
+    engineRef.current.start();
+  }, []);
 
   function onFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const list = e.target.files;
@@ -91,146 +93,224 @@ export default function UploadPage() {
 
   if (!workspace) return null;
 
+  const pct = snapshot ? snapshot.fraction * 100 : 0;
+  const isActive = files.some((f) => f.state === "uploading" || f.state === "queued");
+
   return (
-    <main className="min-h-screen p-6 max-w-5xl mx-auto">
-      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-        <h1 className="text-xl font-semibold">Upload to {workspace}'s drive</h1>
-        <div className="flex gap-2">
-          <Link className="btn-ghost" href="/drive">Back to drive</Link>
+    <main className="min-h-screen bg-slate-50">
+      {/* Header */}
+      <header className="sticky top-0 z-20 bg-white border-b border-slate-200 shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
+          <Link
+            href="/drive"
+            className="inline-flex items-center gap-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-all"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Drive
+          </Link>
+          <div className="h-4 w-px bg-slate-200" />
+          <h1 className="text-sm font-semibold text-slate-900">Upload files</h1>
+          <span className="text-xs text-slate-400 hidden sm:inline">to {workspace}</span>
         </div>
       </header>
 
-      {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-4">
+        {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
-      <section
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
-        className={`card p-8 text-center transition ${dragOver ? "ring-2 ring-brand-500" : ""}`}
-      >
-        <p className="text-slate-600 mb-3">Drag &amp; drop files or a folder here</p>
-        <p className="text-xs text-slate-400 mb-4">— or —</p>
-        <div className="flex justify-center gap-2 flex-wrap">
-          <label className="btn-primary cursor-pointer">
-            Choose files
-            <input type="file" multiple className="hidden" onChange={onFileInput} />
-          </label>
-          <label className="btn-ghost cursor-pointer">
-            Choose folder
-            <input
-              type="file"
-              multiple
-              // @ts-expect-error — non-standard but supported by all evergreen browsers
-              webkitdirectory=""
-              directory=""
-              className="hidden"
-              onChange={onFileInput}
-            />
-          </label>
+        {/* Drop zone */}
+        <div
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+          className={`rounded-2xl border-2 border-dashed p-12 text-center transition-all duration-150 ${
+            dragOver
+              ? "border-brand-400 bg-brand-50 scale-[1.01]"
+              : "border-slate-200 bg-white hover:border-slate-300"
+          }`}
+        >
+          <div className={`inline-flex rounded-2xl p-4 mb-4 transition-colors ${dragOver ? "bg-brand-100" : "bg-slate-100"}`}>
+            <CloudUpload className={`h-8 w-8 ${dragOver ? "text-brand-500" : "text-slate-400"}`} />
+          </div>
+          <p className="text-slate-700 font-medium mb-1">
+            {dragOver ? "Drop to upload" : "Drag & drop files here"}
+          </p>
+          <p className="text-sm text-slate-400 mb-6">or choose files from your device</p>
+          <div className="flex justify-center gap-3 flex-wrap">
+            <label className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-xl px-4 py-2 text-sm font-medium cursor-pointer transition-all shadow-sm">
+              <Upload className="h-4 w-4" />
+              Choose files
+              <input type="file" multiple className="hidden" onChange={onFileInput} />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-slate-700 hover:bg-slate-100 border border-slate-200 rounded-xl px-4 py-2 text-sm font-medium cursor-pointer transition-all">
+              <Folder className="h-4 w-4 text-slate-400" />
+              Choose folder
+              <input
+                type="file"
+                multiple
+                // @ts-expect-error — non-standard but supported by all evergreen browsers
+                webkitdirectory=""
+                directory=""
+                className="hidden"
+                onChange={onFileInput}
+              />
+            </label>
+          </div>
         </div>
-      </section>
 
-      {snapshot && (
-        <section className="card p-4 mt-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold">
-              {snapshot.totalBytes === 0
-                ? "No uploads yet"
-                : `Uploading ${formatSize(snapshot.uploadedBytes)} / ${formatSize(snapshot.totalBytes)}`}
+        {/* Overall progress */}
+        {snapshot && snapshot.totalFiles > 0 && (
+          <Card className="p-5 animate-pop-in">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">
+                  {snapshot.uploadedFiles === snapshot.totalFiles ? (
+                    <span className="flex items-center gap-1.5 text-emerald-600">
+                      <CheckCircle2 className="h-4 w-4" />
+                      Upload complete
+                    </span>
+                  ) : (
+                    `Uploading ${snapshot.uploadedFiles} / ${snapshot.totalFiles} files`
+                  )}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5 tabular-nums">
+                  {formatSize(snapshot.uploadedBytes)} / {formatSize(snapshot.totalBytes)}
+                  {snapshot.overallSpeedBps > 0 && ` · ${formatSize(snapshot.overallSpeedBps)}/s`}
+                  {snapshot.remainingSeconds != null && snapshot.remainingSeconds > 0 && (
+                    <> · {Math.ceil(snapshot.remainingSeconds / 60)}m {Math.round(snapshot.remainingSeconds % 60)}s left</>
+                  )}
+                </div>
+              </div>
+              <div className="text-lg font-semibold tabular-nums text-slate-700">
+                {pct.toFixed(0)}%
+              </div>
             </div>
-            <div className="text-sm text-slate-500">
-              {snapshot.uploadedFiles} / {snapshot.totalFiles} files · {formatSize(snapshot.overallSpeedBps)}/s
-              {snapshot.remainingSeconds != null && (
-                <> · remaining {Math.ceil(snapshot.remainingSeconds / 60)}m {Math.round(snapshot.remainingSeconds % 60)}s</>
+            <ProgressBar value={pct} />
+
+            {/* Status pills */}
+            <div className="flex flex-wrap gap-2 mt-3">
+              {snapshot.queuedFiles > 0 && (
+                <span className="text-xs text-slate-500 bg-slate-100 rounded-full px-2.5 py-0.5">
+                  {snapshot.queuedFiles} queued
+                </span>
+              )}
+              {snapshot.retryingFiles > 0 && (
+                <span className="text-xs text-amber-700 bg-amber-50 rounded-full px-2.5 py-0.5">
+                  {snapshot.retryingFiles} retrying
+                </span>
+              )}
+              {snapshot.failedFiles > 0 && (
+                <span className="text-xs text-red-700 bg-red-50 rounded-full px-2.5 py-0.5 flex items-center gap-1">
+                  <AlertCircle className="h-3 w-3" />
+                  {snapshot.failedFiles} failed
+                </span>
+              )}
+              {snapshot.uploadedFiles > 0 && (
+                <span className="text-xs text-emerald-700 bg-emerald-50 rounded-full px-2.5 py-0.5">
+                  {snapshot.uploadedFiles} done
+                </span>
               )}
             </div>
-          </div>
-          <div className="bar"><div style={{ width: `${(snapshot.fraction * 100).toFixed(1)}%` }} /></div>
-          <div className="text-xs text-slate-500 mt-2 flex flex-wrap gap-3">
-            <span>queued: {snapshot.queuedFiles}</span>
-            <span>retrying: {snapshot.retryingFiles}</span>
-            <span>failed: {snapshot.failedFiles}</span>
-            <span>completed: {snapshot.uploadedFiles}</span>
-          </div>
-        </section>
-      )}
+          </Card>
+        )}
 
-      {files.length > 0 && (
-        <section className="card mt-4 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-100 text-left text-slate-600">
-              <tr>
-                <th className="px-4 py-2">Name</th>
-                <th className="px-4 py-2 w-1/3">Progress</th>
-                <th className="px-4 py-2">State</th>
-                <th className="px-4 py-2 w-1"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {files.map((f) => {
-                const pct = f.size > 0 ? (f.bytesUploaded / f.size) * 100 : 0;
-                return (
-                  <tr key={f.id} className="border-t border-slate-100">
-                    <td className="px-4 py-2">
-                      <div className="truncate max-w-xs">{f.relativePath}</div>
-                      <div className="text-xs text-slate-400">{formatSize(f.bytesUploaded)} / {formatSize(f.size)}</div>
-                    </td>
-                    <td className="px-4 py-2">
-                      <div className="bar"><div style={{ width: `${pct.toFixed(1)}%` }} /></div>
-                      <div className="text-xs text-slate-400 mt-1">{formatSize(f.speedBps)}/s</div>
-                    </td>
-                    <td className="px-4 py-2">
-                      <div className="capitalize">{f.state}</div>
-                      {/*
-                        BUG #7 FIX: surface the underlying error so the
-                        operator can debug. The engine sets `errorMessage`
-                        on every failure; previously this column only
-                        showed the state name ("failed") with no clue
-                        as to why. We render the message inline; if no
-                        message is present we fall back to a short
-                        "no detail" string so the column never looks
-                        empty next to a "failed" state.
-                      */}
-                      {f.state === "failed" && (
-                        <div
-                          className="text-xs text-red-600 mt-1 max-w-xs break-words"
-                          title={f.errorMessage ?? "Upload failed (no error message recorded)."}
-                        >
-                          {f.errorMessage ?? "Upload failed (no error message recorded)."}
-                        </div>
-                      )}
+        {/* Bulk controls */}
+        {files.length > 0 && (
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="ghost" size="sm" onClick={() => engineRef.current?.retryAllFailed()}>
+              <RotateCcw className="h-3.5 w-3.5" /> Retry all failed
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => engineRef.current?.pauseAll()}>
+              <Pause className="h-3.5 w-3.5" /> Pause all
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => engineRef.current?.resumeAll()}>
+              <Play className="h-3.5 w-3.5" /> Resume all
+            </Button>
+            <Button variant="danger" size="sm" onClick={() => engineRef.current?.cancelAll()}>
+              <X className="h-3.5 w-3.5" /> Cancel all
+            </Button>
+          </div>
+        )}
+
+        {/* Per-file cards */}
+        {files.length > 0 && (
+          <Card className="overflow-hidden divide-y divide-slate-50">
+            {files.map((f) => {
+              const pct = f.size > 0 ? (f.bytesUploaded / f.size) * 100 : 0;
+              const isUploading = f.state === "uploading" || f.state === "retrying";
+              return (
+                <div key={f.id} className="px-4 py-3 flex items-start gap-4">
+                  {/* File info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-sm font-medium text-slate-800 truncate">{f.relativePath}</span>
+                      <StatusBadge state={f.state} />
+                    </div>
+
+                    {/* Progress bar */}
+                    {(isUploading || f.state === "paused") && (
+                      <div className="mb-1">
+                        <ProgressBar value={pct} />
+                      </div>
+                    )}
+
+                    {/* Stats row */}
+                    <div className="flex items-center gap-3 text-xs text-slate-400 tabular-nums">
+                      <span>{formatSize(f.bytesUploaded)} / {formatSize(f.size)}</span>
+                      {f.speedBps > 0 && <span>{formatSize(f.speedBps)}/s</span>}
                       {f.state === "retrying" && (
-                        <div className="text-xs text-amber-600 mt-1">
-                          attempt {(f.attempt ?? 0) + 1}
-                        </div>
+                        <span className="text-amber-600">attempt {(f.attempt ?? 0) + 1}</span>
                       )}
-                    </td>
-                    <td className="px-4 py-2 text-right space-x-1">
-                      {f.state === "uploading" || f.state === "retrying" ? (
-                        <button className="btn-ghost text-xs" onClick={() => engineRef.current?.pauseFile(f.id)}>pause</button>
-                      ) : f.state === "paused" ? (
-                        <button className="btn-ghost text-xs" onClick={() => engineRef.current?.resumeFile(f.id)}>resume</button>
-                      ) : null}
-                      {f.state === "failed" && (
-                        <button className="btn-ghost text-xs" onClick={() => engineRef.current?.retryFile(f.id)}>retry</button>
+                      {f.state === "failed" && f.errorMessage && (
+                        <span className="text-red-500 truncate max-w-xs" title={f.errorMessage}>
+                          {f.errorMessage}
+                        </span>
                       )}
-                      {(f.state === "uploading" || f.state === "queued" || f.state === "paused" || f.state === "failed") && (
-                        <button className="btn-ghost text-xs text-red-600" onClick={() => engineRef.current?.cancelFile(f.id)}>cancel</button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
-      )}
+                    </div>
+                  </div>
 
-      <div className="mt-4 flex gap-2">
-        <button className="btn-ghost" onClick={() => engineRef.current?.retryAllFailed()}>Retry all failed</button>
-        <button className="btn-ghost" onClick={() => engineRef.current?.pauseAll()}>Pause all</button>
-        <button className="btn-ghost" onClick={() => engineRef.current?.resumeAll()}>Resume all</button>
-        <button className="btn-ghost text-red-600" onClick={() => engineRef.current?.cancelAll()}>Cancel all</button>
+                  {/* Per-file actions */}
+                  <div className="flex items-center gap-1 shrink-0 mt-0.5">
+                    {isUploading ? (
+                      <button
+                        className="rounded-lg p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all"
+                        onClick={() => engineRef.current?.pauseFile(f.id)}
+                        title="Pause"
+                      >
+                        <Pause className="h-3.5 w-3.5" />
+                      </button>
+                    ) : f.state === "paused" ? (
+                      <button
+                        className="rounded-lg p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all"
+                        onClick={() => engineRef.current?.resumeFile(f.id)}
+                        title="Resume"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                    {f.state === "failed" && (
+                      <button
+                        className="rounded-lg p-1.5 text-slate-400 hover:text-brand-600 hover:bg-brand-50 transition-all"
+                        onClick={() => engineRef.current?.retryFile(f.id)}
+                        title="Retry"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {(f.state === "uploading" || f.state === "queued" || f.state === "paused" || f.state === "failed") && (
+                      <button
+                        className="rounded-lg p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all"
+                        onClick={() => engineRef.current?.cancelFile(f.id)}
+                        title="Cancel"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </Card>
+        )}
       </div>
     </main>
   );
@@ -244,7 +324,6 @@ function formatSize(bytes: number | null | undefined): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-// Recursively walk a DataTransferItemList and collect all files.
 interface PagaskaFsEntry {
   isFile: boolean;
   isDirectory: boolean;
@@ -261,12 +340,9 @@ function collectEntries(entries: PagaskaFsEntry[], out: File[]): Promise<void> {
         new Promise<void>((resolve) => {
           if (entry.isFile) {
             entry.file((f) => {
-              // Preserve folder path by overwriting webkitRelativePath.
               try {
                 Object.defineProperty(f, "webkitRelativePath", { value: entry.fullPath.replace(/^\//, "") });
-              } catch {
-                /* readonly on some engines */
-              }
+              } catch { /* readonly on some engines */ }
               out.push(f);
               resolve();
             });
