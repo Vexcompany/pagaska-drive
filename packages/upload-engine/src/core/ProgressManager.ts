@@ -20,9 +20,24 @@ export class ProgressManager {
   tick(): void {
     const now = Date.now();
     if (!this.onProgress) return;
-    if (now - this.lastEmit < this.emitIntervalMs) return;
-    this.lastEmit = now;
-    this.onProgress(this.snapshot());
+    const snapshot = this.snapshot();
+    // `currentFiles` holds the "uploading"/"retrying" rows; a non-zero
+    // queued/retrying count or a non-empty current list means work is
+    // still in flight, so keep throttling to ~10 Hz. Once every file has
+    // reached a terminal state (completed/failed/canceled/paused) the
+    // throttle must NOT swallow the final snapshot: the completion tick
+    // usually fires within the same millisecond as the last chunk tick,
+    // so a throttled emit here would leave the UI stuck on an outdated
+    // summary (e.g. "0 / 1 files, completed: 0") forever, because no
+    // further tick ever happens.
+    const stillActive =
+      snapshot.queuedFiles > 0 ||
+      snapshot.retryingFiles > 0 ||
+      snapshot.currentFiles.length > 0;
+    if (!stillActive || now - this.lastEmit >= this.emitIntervalMs) {
+      this.lastEmit = now;
+      this.onProgress(snapshot);
+    }
   }
 
   /** Force-emit a snapshot regardless of throttle. */
@@ -90,8 +105,6 @@ export class ProgressManager {
       overallSpeedBps: speedSum,
       remainingSeconds,
       fraction,
-      // touch `now` so the analyzer doesn't flag it as unused in the
-      // future if we add a "stale" detector.
       ...(now ? {} : {}),
     };
   }
