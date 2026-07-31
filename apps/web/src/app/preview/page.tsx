@@ -16,7 +16,7 @@ export default function PreviewPage() {
 }
 
 function PreviewInner() {
-  const { profile, loading } = useAuth();
+  const { workspace, loading } = useAuth();
   const router = useRouter();
   const params = useSearchParams();
   const id = params.get("id");
@@ -24,8 +24,8 @@ function PreviewInner() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!loading && !profile) router.replace("/");
-  }, [loading, profile, router]);
+    if (!loading && !workspace) router.replace("/");
+  }, [loading, workspace, router]);
 
   useEffect(() => {
     if (!id) return;
@@ -33,7 +33,7 @@ function PreviewInner() {
   }, [id]);
 
   if (!id) return <main className="p-6">Missing id.</main>;
-  if (!profile) return null;
+  if (!workspace) return null;
 
   return (
     <main className="min-h-screen p-6 max-w-5xl mx-auto">
