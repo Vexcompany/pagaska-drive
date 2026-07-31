@@ -7,9 +7,10 @@
   "main": "./src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
+    "build": "npm run build --workspace @pagaska/shared --workspace @pagaska/upload-engine && tsc --noEmit",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "npm run build --workspace @pagaska/shared --workspace @pagaska/upload-engine && vitest run",
     "clean": "rm -rf dist .wrangler"
   },
   "dependencies": {
