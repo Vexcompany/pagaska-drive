@@ -559,7 +559,7 @@ async function isInsideRoot(
     const f = await getFile(env, current);
     current = f.parents?.[0];
   }
-  // Confirm at least one ancestor is the workspace folder.
+  // Confirm at least one ancestor is the workspace folder
   for (const id of seen) {
     const f = await getFile(env, id);
     if (f.name === workspace) return true;
