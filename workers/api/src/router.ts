@@ -17,7 +17,7 @@ import { isWorkspace, WORKSPACES, type Workspace, type ApiErrorCode } from "@pag
 const CORS_HEADERS = (origin: string) => ({
   "Access-Control-Allow-Origin": origin,
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, content-type, x-pagaska-workspace",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-pagaska-workspace, x-session-uri, x-upload-start, x-upload-end, x-upload-total",
   "Access-Control-Max-Age": "86400",
 });
 
