@@ -185,6 +185,110 @@ export async function fetchMedia(
 }
 
 /**
+ * Recursive, case-insensitive, partial-name search across the whole
+ * Drive (any depth). Drive's `name contains` matches partial names
+ * case-insensitively and is not limited to a single folder, so nested
+ * files and folders are found. The caller scopes results to the
+ * workspace root.
+ */
+export async function searchDrive(
+  env: Parameters<typeof getAccessToken>[0],
+  query: string
+): Promise<DriveFile[]> {
+  const safe = query.replace(/'/g, "\\'");
+  const q = `name contains '${safe}' and trashed = false`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)&pageSize=200&orderBy=folder,name`;
+  const res = await authedFetch(url, { method: "GET" }, env);
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  const data = (await res.json()) as { files: DriveFile[] };
+  return data.files ?? [];
+}
+
+export interface PermissionInfo {
+  id: string | null;
+  type: string | null;
+  role: string | null;
+  allowFileDiscovery: boolean | null;
+}
+
+/** Lists the permissions attached to a file or folder. */
+export async function listPermissions(
+  env: Parameters<typeof getAccessToken>[0],
+  fileId: string
+): Promise<PermissionInfo[]> {
+  const res = await authedFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions?fields=permissions(id,type,role,allowFileDiscovery)`,
+    { method: "GET" },
+    env
+  );
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  const data = (await res.json()) as {
+    permissions?: Array<{ id?: string; type?: string; role?: string; allowFileDiscovery?: boolean }>;
+  };
+  return (data.permissions ?? []).map((p) => ({
+    id: p.id ?? null,
+    type: p.type ?? null,
+    role: p.role ?? null,
+    allowFileDiscovery: p.allowFileDiscovery ?? null,
+  }));
+}
+
+/** Move a file or folder to another parent (Drive PATCH with add/removeParents). */
+export async function moveFile(
+  env: Parameters<typeof getAccessToken>[0],
+  fileId: string,
+  newParentId: string
+): Promise<DriveFile> {
+  const file = await getFile(env, fileId);
+  const oldParents = (file.parents ?? []).join(",");
+  const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?addParents=${encodeURIComponent(newParentId)}&removeParents=${encodeURIComponent(oldParents)}`;
+  const res = await authedFetch(
+    url,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{}" },
+    env
+  );
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  return (await res.json()) as DriveFile;
+}
+
+export interface SubtreeEntry {
+  path: string;
+  data: Uint8Array;
+}
+
+/**
+ * Recursively collects every file under a folder as {path, bytes} pairs
+ * so the caller can build a ZIP. Folders become empty entries with a
+ * trailing "/". Files that fail to fetch (e.g. Google-native docs) are
+ * skipped so one bad entry never fails the whole download.
+ */
+export async function collectSubtree(
+  env: Parameters<typeof getAccessToken>[0],
+  folderId: string,
+  prefix: string
+): Promise<SubtreeEntry[]> {
+  const children = await listChildren(env, folderId);
+  const out: SubtreeEntry[] = [];
+  for (const child of children) {
+    const rel = prefix ? `${prefix}/${child.name}` : child.name;
+    if (child.mimeType === "application/vnd.google-apps.folder") {
+      out.push({ path: `${rel}/`, data: new Uint8Array(0) });
+      out.push(...(await collectSubtree(env, child.id, rel)));
+    } else {
+      try {
+        const media = await fetchMedia(env, child.id);
+        const buf = await media.arrayBuffer();
+        out.push({ path: rel, data: new Uint8Array(buf) });
+      } catch {
+        // Unfetchable file (Google Docs/Sheets/Slides, quota hiccup):
+        // skip rather than fail the entire folder download.
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Make a file or folder readable by anyone with the link. Drive treats
  * folders as files for permissions, so this works for both. The check
  * lists existing permissions first and only creates one when the file is
@@ -195,18 +299,8 @@ export async function ensurePublicPermission(
   env: Parameters<typeof getAccessToken>[0],
   fileId: string
 ): Promise<DriveFile> {
-  const listRes = await authedFetch(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions?fields=permissions(id,type,role,allowFileDiscovery)`,
-    { method: "GET" },
-    env
-  );
-  if (!listRes.ok) throw new HttpError(listRes.status, "DRIVE_ERROR", await listRes.text());
-  const data = (await listRes.json()) as {
-    permissions?: Array<{ type?: string; role?: string }>;
-  };
-  const alreadyPublic = (data.permissions ?? []).some(
-    (p) => p.type === "anyone" && p.role === "reader"
-  );
+  const permissions = await listPermissions(env, fileId);
+  const alreadyPublic = permissions.some((p) => p.type === "anyone" && p.role === "reader");
   if (!alreadyPublic) {
     const createRes = await authedFetch(
       `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions`,

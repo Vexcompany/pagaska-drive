@@ -11,8 +11,13 @@ import {
   ensureFolder,
   fetchMedia,
   ensurePublicPermission,
+  listPermissions,
+  searchDrive,
+  moveFile,
+  collectSubtree,
   HttpError,
 } from "./google";
+import { buildZip } from "./zip";
 import { isWorkspace, WORKSPACES, type Workspace, type ApiErrorCode } from "@pagaska/shared";
 
 const CORS_HEADERS = (origin: string) => ({
@@ -317,7 +322,58 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       return new Response(media.body, { status: media.status, headers });
     }
 
-    // ------- SHARE (anyone-with-link) -------
+    // ------- SEARCH (recursive, partial, case-insensitive) -------
+    if (path === "/search" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const query = (url.searchParams.get("q") ?? "").trim();
+      if (!query) return json({ files: [], folders: [] }, {}, origin);
+      const results = await searchDrive(env, query);
+      // Scope to this workspace's root and resolve each result's path.
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
+      const files: { id: string; name: string; mimeType: string; size: string | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; path: string | null }[] = [];
+      const folders: typeof files = [];
+      for (const item of results) {
+        const path = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
+        if (path === undefined) continue; // outside the workspace root
+        const entry = {
+          id: item.id,
+          name: item.name,
+          mimeType: item.mimeType,
+          size: item.size,
+          parents: item.parents,
+          thumbnailLink: item.thumbnailLink,
+          webViewLink: item.webViewLink,
+          modifiedTime: item.modifiedTime,
+          path: path === null ? null : path,
+        };
+        if (item.mimeType === "application/vnd.google-apps.folder") folders.push(entry);
+        else files.push(entry);
+      }
+      return json({ files, folders }, {}, origin);
+    }
+
+    // ------- SHARE STATUS (GET) / MAKE PUBLIC (POST) -------
+    if (path === "/share" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const fileId = url.searchParams.get("id");
+      if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
+      const file = await getFile(env, fileId);
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      }
+      const permissions = await listPermissions(env, fileId);
+      const publicPerm = permissions.find((p) => p.type === "anyone" && p.role === "reader");
+      return json(
+        {
+          public: Boolean(publicPerm),
+          role: publicPerm?.role ?? null,
+          webViewLink: file.webViewLink ?? null,
+        },
+        {},
+        origin
+      );
+    }
+
     if (path === "/share" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null)) as { fileId?: unknown } | null;
@@ -331,6 +387,81 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       }
       const shared = await ensurePublicPermission(env, body.fileId);
       return json({ webViewLink: shared.webViewLink }, {}, origin);
+    }
+
+    // ------- MOVE -------
+    if (path === "/move" && request.method === "POST") {
+      const workspace = await requireAuth(request, env);
+      const body = (await request.json().catch(() => null)) as { fileIds?: unknown; parentId?: unknown } | null;
+      if (
+        !body ||
+        !Array.isArray(body.fileIds) ||
+        body.fileIds.length === 0 ||
+        !body.fileIds.every((id) => typeof id === "string")
+      ) {
+        return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
+      }
+      const parentId = body.parentId === null || body.parentId === undefined ? null : body.parentId;
+      if (parentId !== null && typeof parentId !== "string") {
+        return err("INVALID_PAYLOAD", "parentId must be a string or null.", 400, origin);
+      }
+      // Destination must be a folder inside the workspace root.
+      if (parentId) {
+        const target = await getFile(env, parentId);
+        if (target.mimeType !== "application/vnd.google-apps.folder") {
+          return err("INVALID_PAYLOAD", "Destination is not a folder.", 400, origin);
+        }
+        if (!isInsideRoot(target, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+          return err("FORBIDDEN", "Destination is outside the workspace root.", 403, origin);
+        }
+      }
+      let moved = 0;
+      for (const fileId of body.fileIds as string[]) {
+        const file = await getFile(env, fileId);
+        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
+        await moveFile(env, fileId, parentId ?? env.GOOGLE_DRIVE_ROOT);
+        moved += 1;
+      }
+      return json({ ok: true, moved }, {}, origin);
+    }
+
+    // ------- DOWNLOAD (single file) -------
+    if (path === "/download" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const fileId = url.searchParams.get("id");
+      if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
+      const file = await getFile(env, fileId);
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      }
+      const media = await fetchMedia(env, fileId);
+      const headers = new Headers(CORS_HEADERS(origin));
+      headers.set("Content-Type", file.mimeType);
+      headers.set("Content-Disposition", `attachment; filename="${sanitizeFilename(file.name)}"`);
+      const length = media.headers.get("content-length");
+      if (length) headers.set("Content-Length", length);
+      return new Response(media.body, { status: media.status, headers });
+    }
+
+    // ------- DOWNLOAD FOLDER (as ZIP) -------
+    if (path === "/download/folder" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const folderId = url.searchParams.get("id");
+      if (!folderId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
+      const folder = await getFile(env, folderId);
+      if (!isInsideRoot(folder, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+        return err("FORBIDDEN", "Folder is outside the workspace root.", 403, origin);
+      }
+      // Prefix entries with the folder's own name so the ZIP contains the
+      // folder itself (e.g. "Vacation/photo1.jpg"), like Drive exports do.
+      const subtree = await collectSubtree(env, folderId, folder.name);
+      const entries = [{ path: `${folder.name}/`, data: new Uint8Array(0) }, ...subtree];
+      const zip = buildZip(entries);
+      const headers = new Headers(CORS_HEADERS(origin));
+      headers.set("Content-Type", "application/zip");
+      headers.set("Content-Disposition", `attachment; filename="${sanitizeFilename(folder.name)}.zip"`);
+      headers.set("Content-Length", String(zip.byteLength));
+      return new Response(zip, { status: 200, headers });
     }
 
     return err("NOT_FOUND", `Unknown route: ${request.method} ${path}`, 404, origin);
@@ -363,6 +494,49 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   let diff = 0;
   for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
   return diff === 0;
+}
+
+/**
+ * Sanitizes a filename for use inside a Content-Disposition header
+ * (quotes and control characters would break the header).
+ */
+function sanitizeFilename(name: string): string {
+  return name.replace(/["\r\n]/g, "_").replace(/\\/g, "_");
+}
+
+/**
+ * Resolves a search result's path inside the workspace root. Returns:
+ *   - a path string (segments joined with "/", e.g. "A/B") when the item
+ *     is inside the workspace subtree,
+ *   - null when the item is a direct child of the workspace folder,
+ *   - undefined when the item is outside the workspace (caller skips it).
+ * Uses the shared `cache` to avoid repeated getFile calls per search.
+ */
+async function scopedSearchPath(
+  env: Env,
+  file: { parents?: string[] },
+  rootId: string,
+  workspace: Workspace,
+  cache: Map<string, Awaited<ReturnType<typeof getFile>>>
+): Promise<string | null | undefined> {
+  if (!file.parents || file.parents.length === 0) return undefined;
+  if (file.parents.includes(rootId)) return undefined; // sibling of the workspace folder
+  const names: string[] = [];
+  let current: string | undefined = file.parents[0];
+  const seen = new Set<string>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    let f = cache.get(current);
+    if (!f) {
+      f = await getFile(env, current);
+      cache.set(current, f);
+    }
+    if (current === rootId) return names.join("/");
+    if (f.name === workspace) return names.length ? names.join("/") : null;
+    names.unshift(f.name);
+    current = f.parents?.[0];
+  }
+  return undefined;
 }
 
 /** Walks parents from the file up to GOOGLE_DRIVE_ROOT, ensuring the
