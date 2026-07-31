@@ -21,6 +21,5 @@ export interface Env {
   PAGASKA_PASSWORD: string;
   OSAMA_PASSWORD: string;
   PMR_PASSWORD: string;
-  /** Public CORS origin (set in wrangler.toml [vars]). */
   CORS_ORIGIN?: string;
 }
