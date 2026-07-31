@@ -8,7 +8,7 @@ import { createEngine, toUploadSources } from "@/lib/engine";
 import type { ProgressSnapshot, UploadFileSnapshot, UploadEngine } from "@pagaska/upload-engine";
 
 export default function UploadPage() {
-  const { profile, loading } = useAuth();
+  const { workspace, loading } = useAuth();
   const router = useRouter();
   const engineRef = useRef<UploadEngine | null>(null);
   const [snapshot, setSnapshot] = useState<ProgressSnapshot | null>(null);
@@ -18,12 +18,12 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!loading && !profile) router.replace("/");
-  }, [loading, profile, router]);
+    if (!loading && !workspace) router.replace("/");
+  }, [loading, workspace, router]);
 
   // Construct one engine per page-mount; tear it down on unmount.
   useEffect(() => {
-    if (!profile) return;
+    if (!workspace) return;
     const engine = createEngine({
       parentId: folderId,
       onProgress: (snap) => setSnapshot(snap),
@@ -42,7 +42,7 @@ export default function UploadPage() {
       void engine.stop();
       engineRef.current = null;
     };
-  }, [profile, folderId]);
+  }, [workspace, folderId]);
 
   const handleFiles = useCallback(
     async (rawFiles: File[]) => {
@@ -78,12 +78,12 @@ export default function UploadPage() {
     }
   }
 
-  if (!profile) return null;
+  if (!workspace) return null;
 
   return (
     <main className="min-h-screen p-6 max-w-5xl mx-auto">
-      <header className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">Upload to {profile}'s drive</h1>
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+        <h1 className="text-xl font-semibold">Upload to {workspace}'s drive</h1>
         <div className="flex gap-2">
           <Link className="btn-ghost" href="/drive">Back to drive</Link>
         </div>
