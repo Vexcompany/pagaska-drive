@@ -33,6 +33,51 @@ import type {
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
 
+/** Maximum items per batch request (must match the backend MAX_BATCH). */
+export const MAX_BATCH = 20;
+
+/** Progress state for a batched operation across multiple API calls. */
+export interface BatchProgress {
+  total: number;
+  done: number;
+  failed: string[];
+  succeeded: string[];
+  running: boolean;
+}
+
+/**
+ * Split `ids` into chunks of MAX_BATCH and call `fn` sequentially.
+ * Reports progress after each chunk.  Continues on partial failure
+ * so the caller can show which items failed.
+ */
+export async function batchOperation(
+  ids: string[],
+  fn: (batchIds: string[]) => Promise<{ succeeded: number; failed: string[] }>,
+  onProgress?: (progress: BatchProgress) => void,
+): Promise<BatchProgress> {
+  const progress: BatchProgress = { total: ids.length, done: 0, failed: [], succeeded: [], running: true };
+  onProgress?.(progress);
+
+  for (let i = 0; i < ids.length; i += MAX_BATCH) {
+    const chunk = ids.slice(i, i + MAX_BATCH);
+    try {
+      const res = await fn(chunk);
+      progress.succeeded.push(...chunk.slice(0, res.succeeded));
+      progress.failed.push(...res.failed);
+      progress.done += chunk.length;
+    } catch {
+      // Entire chunk failed — treat all items as failed
+      progress.failed.push(...chunk);
+      progress.done += chunk.length;
+    }
+    onProgress?.(progress);
+  }
+
+  progress.running = false;
+  onProgress?.(progress);
+  return progress;
+}
+
 /**
  * Structured API error. The Worker always returns
  * `{success: false, code, message, status}` on the failure path.
