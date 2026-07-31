@@ -127,6 +127,37 @@ export interface ShareResponse {
   webViewLink: string;
 }
 
+export interface ShareStatusResponse {
+  /** True when an "anyone / reader" permission exists. */
+  public: boolean;
+  /** Role of the public permission ("reader" when public). */
+  role: string | null;
+  /** The public webViewLink (null while restricted). */
+  webViewLink: string | null;
+}
+
+export interface SearchItem extends DriveFile {
+  /** Resolved path from the workspace root, e.g. "A/B" (null when the item is directly under the workspace folder). */
+  path: string | null;
+}
+
+export interface SearchResponse {
+  files: SearchItem[];
+  folders: SearchItem[];
+}
+
+export interface MoveRequest {
+  /** File or folder ids to move. */
+  fileIds: string[];
+  /** Destination folder id (null = workspace root). */
+  parentId: string | null;
+}
+
+export interface MoveResponse {
+  ok: boolean;
+  moved: number;
+}
+
 export interface LoginRequest {
   /** Workspace to sign in as. */
   workspace: Workspace;
