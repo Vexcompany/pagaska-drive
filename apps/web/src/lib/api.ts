@@ -10,16 +10,20 @@ import type {
   FinishUploadResponse,
   ListFilesResponse,
   LoginRequest,
+  MoveRequest,
+  MoveResponse,
   PreviewResponse,
   RenameRequest,
+  SearchResponse,
   ShareRequest,
   ShareResponse,
+  ShareStatusResponse,
   StartUploadRequest,
   StartUploadResponse,
   Workspace,
 } from "@pagaska/shared";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
 
 /**
  * Structured API error. The Worker always returns
@@ -117,6 +121,15 @@ export const api = {
   async share(fileId: string): Promise<ShareResponse> {
     const body: ShareRequest = { fileId };
     return call<ShareResponse>("/share", { method: "POST", body: JSON.stringify(body) });
+  },
+  async shareStatus(fileId: string): Promise<ShareStatusResponse> {
+    return call<ShareStatusResponse>(`/share?id=${encodeURIComponent(fileId)}`);
+  },
+  async search(q: string): Promise<SearchResponse> {
+    return call<SearchResponse>(`/search?q=${encodeURIComponent(q)}`);
+  },
+  async move(req: MoveRequest): Promise<MoveResponse> {
+    return call<MoveResponse>("/move", { method: "POST", body: JSON.stringify(req) });
   },
 };
 
