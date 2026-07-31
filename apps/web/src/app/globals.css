@@ -38,3 +38,18 @@ body {
 .bar > div {
   @apply h-full bg-gradient-to-r from-brand-400 to-brand-600 transition-all;
 }
+
+@keyframes pop-in {
+  0% {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-pop-in {
+  animation: pop-in 0.18s ease-out;
+}
