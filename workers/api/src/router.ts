@@ -1,7 +1,6 @@
 import type { Env } from "./env";
 import { signJwt, verifyJwt } from "./jwt";
 import {
-  getAccessToken,
   listChildren,
   getFile,
   getBreadcrumb,
@@ -10,6 +9,8 @@ import {
   startResumableUpload,
   forwardChunk,
   ensureFolder,
+  fetchMedia,
+  ensurePublicPermission,
   HttpError,
 } from "./google";
 import { isWorkspace, WORKSPACES, type Workspace, type ApiErrorCode } from "@pagaska/shared";
@@ -269,8 +270,6 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      // Signed content / thumbnail URL via a one-off access token.
-      const accessToken = await getAccessToken(env);
       // Defensive: `thumbnailLink` is typed as `string | null` but Google
       // can omit it entirely (in which case the JSON deserializes to
       // `undefined`). Guard against both before calling `.replace`.
@@ -278,7 +277,11 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         file.thumbnailLink && typeof file.thumbnailLink === "string"
           ? file.thumbnailLink.replace(/=s\d+/, "=s1024")
           : null;
-      const contentUrl = `${DRIVE}/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(accessToken)}`;
+      // Content is proxied through the Worker (`/media`) so the browser
+      // never needs a Google token or signed URL; the Worker streams the
+      // bytes with CORS headers and honors Range requests.
+      const baseOrigin = new URL(request.url).origin;
+      const contentUrl = `${baseOrigin}/media?id=${encodeURIComponent(fileId)}`;
       return json(
         {
           id: file.id,
@@ -294,6 +297,42 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       );
     }
 
+    // ------- MEDIA (proxied file content) -------
+    if (path === "/media" && request.method === "GET") {
+      await requireAuth(request, env);
+      const fileId = url.searchParams.get("id");
+      if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
+      const file = await getFile(env, fileId);
+      const range = request.headers.get("range");
+      const media = await fetchMedia(env, fileId, range);
+      const headers = new Headers(CORS_HEADERS(origin));
+      headers.set("Content-Type", file.mimeType);
+      // Pass through the headers that make media streaming work:
+      // Content-Range / Accept-Ranges / Content-Length come from Google's
+      // 200 or 206 response and must match the body actually streamed.
+      for (const name of ["content-range", "accept-ranges", "content-length", "etag", "last-modified"]) {
+        const value = media.headers.get(name);
+        if (value) headers.set(name, value);
+      }
+      return new Response(media.body, { status: media.status, headers });
+    }
+
+    // ------- SHARE (anyone-with-link) -------
+    if (path === "/share" && request.method === "POST") {
+      const workspace = await requireAuth(request, env);
+      const body = (await request.json().catch(() => null)) as { fileId?: unknown } | null;
+      if (!body || typeof body.fileId !== "string" || !body.fileId.trim()) {
+        return err("INVALID_PAYLOAD", "fileId is required.", 400, origin);
+      }
+      // Only files inside this workspace's root can be shared by the user.
+      const file = await getFile(env, body.fileId);
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      }
+      const shared = await ensurePublicPermission(env, body.fileId);
+      return json({ webViewLink: shared.webViewLink }, {}, origin);
+    }
+
     return err("NOT_FOUND", `Unknown route: ${request.method} ${path}`, 404, origin);
   } catch (e) {
     if (e instanceof HttpError) {
@@ -303,8 +342,6 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     return err("INTERNAL_ERROR", message, 500, origin);
   }
 }
-
-const DRIVE = "https://www.googleapis.com/drive/v3";
 
 /**
  * Constant-time string comparison. Both inputs are coerced to UTF-8

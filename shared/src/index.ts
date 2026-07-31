@@ -111,9 +111,20 @@ export interface PreviewResponse {
   size: number | null;
   /** A short-lived, signed Google thumbnail URL (or `null` if not available). */
   thumbnailUrl: string | null;
-  /** A short-lived, signed Google content URL. */
+  /** Worker-proxied content URL (GET /media?id=…). The browser never talks
+   *  to Google directly; the Worker streams the bytes with CORS headers. */
   contentUrl: string | null;
   webViewLink: string | null;
+}
+
+export interface ShareRequest {
+  /** Drive file or folder id to make public. */
+  fileId: string;
+}
+
+export interface ShareResponse {
+  /** The public webViewLink that works without a Google login (incognito). */
+  webViewLink: string;
 }
 
 export interface LoginRequest {

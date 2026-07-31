@@ -160,6 +160,73 @@ export async function renameFile(env: Parameters<typeof getAccessToken>[0], file
 }
 
 /**
+ * Stream the raw file content from Drive (`alt=media`) with the Worker's
+ * access token. The optional `range` header (e.g. "bytes=0-1023") is
+ * forwarded so the browser can seek inside videos/audios (206 responses).
+ * The caller wraps the returned body in a CORS-enabled Response.
+ */
+export async function fetchMedia(
+  env: Parameters<typeof getAccessToken>[0],
+  fileId: string,
+  range?: string | null
+): Promise<Response> {
+  const token = await getAccessToken(env);
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (range) headers.Range = range;
+  const res = await fetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`, {
+    method: "GET",
+    headers,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new HttpError(res.status, "DRIVE_ERROR", text || `Drive media request failed with ${res.status}`);
+  }
+  return res;
+}
+
+/**
+ * Make a file or folder readable by anyone with the link. Drive treats
+ * folders as files for permissions, so this works for both. The check
+ * lists existing permissions first and only creates one when the file is
+ * still restricted (no `anyone`/`reader` entry yet), so re-sharing an
+ * already-public item is a no-op.
+ */
+export async function ensurePublicPermission(
+  env: Parameters<typeof getAccessToken>[0],
+  fileId: string
+): Promise<DriveFile> {
+  const listRes = await authedFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions?fields=permissions(id,type,role,allowFileDiscovery)`,
+    { method: "GET" },
+    env
+  );
+  if (!listRes.ok) throw new HttpError(listRes.status, "DRIVE_ERROR", await listRes.text());
+  const data = (await listRes.json()) as {
+    permissions?: Array<{ type?: string; role?: string }>;
+  };
+  const alreadyPublic = (data.permissions ?? []).some(
+    (p) => p.type === "anyone" && p.role === "reader"
+  );
+  if (!alreadyPublic) {
+    const createRes = await authedFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}/permissions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "reader", type: "anyone", allowFileDiscovery: false }),
+      },
+      env
+    );
+    if (!createRes.ok) throw new HttpError(createRes.status, "DRIVE_ERROR", await createRes.text());
+  }
+  const file = await getFile(env, fileId);
+  if (!file.webViewLink) {
+    throw new HttpError(500, "INTERNAL_ERROR", "Drive did not return a webViewLink.");
+  }
+  return file;
+}
+
+/**
  * Open a resumable upload session in Drive. Returns the Location
  * header which the browser uses to PUT chunks.
  */

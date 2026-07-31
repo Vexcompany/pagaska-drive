@@ -17,6 +17,7 @@ export default function DrivePage() {
   const [renaming, setRenaming] = useState<DriveFile | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [shareNotice, setShareNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async (id: string | null) => {
     setLoadingFiles(true);
@@ -61,6 +62,25 @@ export default function DrivePage() {
     void refresh(folderId);
   }
 
+  async function shareOne(item: DriveFile) {
+    try {
+      // The Worker adds an "anyone / reader" permission (no-op when the
+      // item is already public) and returns the public webViewLink.
+      const { webViewLink } = await api.share(item.id);
+      try {
+        await navigator.clipboard.writeText(webViewLink);
+        setShareNotice(`Public link copied to clipboard: ${webViewLink}`);
+      } catch {
+        // Clipboard unavailable (non-secure context, permissions) — still
+        // surface the link so the user can copy it manually.
+        setShareNotice(`Public link: ${webViewLink}`);
+      }
+    } catch (err) {
+      setShareNotice(err instanceof Error ? `Share failed: ${err.message}` : "Share failed.");
+    }
+    window.setTimeout(() => setShareNotice(null), 6000);
+  }
+
   return (
     <main className="min-h-screen p-6 max-w-6xl mx-auto">
       <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
@@ -81,6 +101,7 @@ export default function DrivePage() {
       </header>
 
       {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
+      {shareNotice && <p className="text-sm text-slate-600 mb-2 break-all">{shareNotice}</p>}
 
       <section className="card p-4 mb-4">
         <div className="flex gap-2">
@@ -118,6 +139,7 @@ export default function DrivePage() {
                 <td className="px-4 py-2">{f.modifiedTime?.replace("T", " ").slice(0, 19) ?? "—"}</td>
                 <td className="px-4 py-2 text-right">
                   <button onClick={() => { setRenaming(f); setRenameValue(f.name); }} className="btn-ghost text-xs">rename</button>
+                  <button onClick={() => shareOne(f)} className="btn-ghost text-xs">share</button>
                   <button onClick={() => deleteOne(f.id)} className="btn-ghost text-xs text-red-600">delete</button>
                 </td>
               </tr>
@@ -134,6 +156,7 @@ export default function DrivePage() {
                 <td className="px-4 py-2">{f.modifiedTime?.replace("T", " ").slice(0, 19) ?? "—"}</td>
                 <td className="px-4 py-2 text-right">
                   <button onClick={() => { setRenaming(f); setRenameValue(f.name); }} className="btn-ghost text-xs">rename</button>
+                  <button onClick={() => shareOne(f)} className="btn-ghost text-xs">share</button>
                   <button onClick={() => deleteOne(f.id)} className="btn-ghost text-xs text-red-600">delete</button>
                 </td>
               </tr>

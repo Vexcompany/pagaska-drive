@@ -12,6 +12,8 @@ import type {
   LoginRequest,
   PreviewResponse,
   RenameRequest,
+  ShareRequest,
+  ShareResponse,
   StartUploadRequest,
   StartUploadResponse,
   Workspace,
@@ -111,6 +113,10 @@ export const api = {
   },
   async preview(id: string): Promise<PreviewResponse> {
     return call(`/preview?id=${encodeURIComponent(id)}`);
+  },
+  async share(fileId: string): Promise<ShareResponse> {
+    const body: ShareRequest = { fileId };
+    return call<ShareResponse>("/share", { method: "POST", body: JSON.stringify(body) });
   },
 };
 
