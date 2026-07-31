@@ -3,8 +3,18 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# Public environment variable. Secrets (client id/secret, refresh
-# token, jwt secret) are set via:
+# Public environment variable. Secrets (Google credentials, JWT
+# secret, per-workspace passwords) are set via:
 #   wrangler secret put NAME
+# Required secrets:
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
+#   GOOGLE_DRIVE_ROOT, JWT_SECRET
+#   PAGASKA_PASSWORD, OSAMA_PASSWORD, PMR_PASSWORD
 [vars]
+# Public CORS origin. In dev you can leave this "*", in production
+# replace with your Vercel domain, e.g. "https://pagaska.vercel.app".
 CORS_ORIGIN = "*"
+
+# Resource limits
+[limits]
+cpu_ms = 50
