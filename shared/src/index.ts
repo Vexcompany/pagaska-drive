@@ -45,6 +45,8 @@ export interface DriveFile {
   thumbnailLink: string | null;
   webViewLink: string | null;
   modifiedTime: string | null;
+  /** Whether the item is in the trash. */
+  trashed: boolean;
 }
 
 export interface DriveFolder extends DriveFile {
@@ -115,6 +117,8 @@ export interface PreviewResponse {
    *  to Google directly; the Worker streams the bytes with CORS headers. */
   contentUrl: string | null;
   webViewLink: string | null;
+  /** Whether the item is currently in the trash. */
+  trashed: boolean;
 }
 
 export interface ShareRequest {
@@ -165,6 +169,50 @@ export interface LoginRequest {
   password: string;
 }
 
+// ── Trash ──────────────────────────────────────────────────────────────────
+
+export interface TrashRequest {
+  /** File or folder ids to move to trash. */
+  fileIds: string[];
+}
+
+export interface TrashResponse {
+  ok: boolean;
+  trashed: number;
+}
+
+export interface TrashRestoreRequest {
+  /** File or folder ids to restore from trash. */
+  fileIds: string[];
+}
+
+export interface TrashRestoreResponse {
+  ok: boolean;
+  restored: number;
+}
+
+export interface TrashDeleteForeverRequest {
+  /** File or folder ids to permanently delete. */
+  fileIds: string[];
+}
+
+export interface TrashDeleteForeverResponse {
+  ok: boolean;
+  deleted: number;
+}
+
+export interface TrashListResponse {
+  files: DriveFile[];
+  folders: DriveFolder[];
+  /** Breadcrumb when navigating inside a trashed folder. */
+  breadcrumb: { id: string; name: string }[];
+}
+
+export interface TrashSearchResponse {
+  files: SearchItem[];
+  folders: SearchItem[];
+}
+
 /**
  * Standardised error envelope returned by every Worker endpoint on
  * the failure path. Successes continue to return their own typed
@@ -192,4 +240,5 @@ export type ApiErrorCode =
   | "INTERNAL_ERROR"
   | "NOT_FOUND"
   | "MISSING_CONFIG"
-  | "CONFIG_ERROR";
+  | "CONFIG_ERROR"
+  | "ITEM_IN_TRASH";
