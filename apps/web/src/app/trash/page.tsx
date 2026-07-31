@@ -98,7 +98,7 @@ function TrashInner() {
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: DriveFile } | null>(null);
 
-  // Properties dialog
+  // Properties dialog.
   const [propsItem, setPropsItem] = useState<DriveFile | null>(null);
 
   const isSearching = Boolean(query.trim()) && results !== null;
