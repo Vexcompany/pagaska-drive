@@ -1,6 +1,5 @@
 /**
  * Google Drive API helpers — runs server-side only inside the Worker.
- *
  * Every function takes the access token explicitly so we can swap it
  * for a fresh one via `getAccessToken` on every request. The browser
  * never sees these tokens.
