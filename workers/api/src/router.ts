@@ -351,3 +351,4 @@ async function isInsideRoot(
   }
   return false;
 }
+
