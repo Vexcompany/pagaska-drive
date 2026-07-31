@@ -218,7 +218,28 @@ export async function forwardChunk(
     const range = res.headers.get("Range");
     if (range) {
       const m = /bytes=0-(\d+)/.exec(range);
-      if (m) return { acknowledged: Number(m[1]) + 1, finished: false, driveFileId: null };
+      if (m) {
+        const acknowledged = Number(m[1]) + 1;
+        // Drive has every byte but answered 308 because the last chunk
+        // ended on a 256 KiB boundary, so the session is not finalized
+        // until the client sends the empty final request. Without this
+        // step the upload is never marked complete and the file stays
+        // stuck in "uploading" on the client.
+        if (acknowledged >= args.total) {
+          const finalRes = await fetch(args.sessionUri, {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Range": `bytes */${args.total}`,
+            },
+          });
+          if (finalRes.status === 200 || finalRes.status === 201) {
+            const body = (await finalRes.json().catch(() => null)) as { id?: string } | null;
+            return { acknowledged: args.total, finished: true, driveFileId: body?.id ?? null };
+          }
+        }
+        return { acknowledged, finished: false, driveFileId: null };
+      }
     }
     return { acknowledged: args.end, finished: false, driveFileId: null };
   }
