@@ -251,7 +251,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   );
 }
 
-// ── ErrorBanner ───────────────────────────────────────────────────────────────
+// ── ErrorBanner ──────────────────────────────────────────────────────────────
 
 export function ErrorBanner({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
