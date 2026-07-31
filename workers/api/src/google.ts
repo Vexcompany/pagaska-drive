@@ -10,8 +10,25 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 
+export type HttpErrorCode =
+  | "INVALID_LOGIN_PAYLOAD"
+  | "INVALID_CREDENTIALS"
+  | "UNAUTHENTICATED"
+  | "FORBIDDEN"
+  | "INVALID_PAYLOAD"
+  | "MISSING_QUERY_PARAM"
+  | "DRIVE_ERROR"
+  | "INTERNAL_ERROR"
+  | "NOT_FOUND"
+  | "MISSING_CONFIG"
+  | "CONFIG_ERROR";
+
 export class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    public code: HttpErrorCode,
+    message: string
+  ) {
     super(message);
     this.name = "HttpError";
   }
@@ -35,7 +52,7 @@ export async function getAccessToken(env: { GOOGLE_CLIENT_ID: string; GOOGLE_CLI
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new HttpError(res.status, `Google token exchange failed: ${text}`);
+    throw new HttpError(res.status, "CONFIG_ERROR", `Google token exchange failed: ${text}`);
   }
   const data = (await res.json()) as { access_token: string; expires_in: number };
   return data.access_token;
@@ -64,7 +81,7 @@ export async function findFolder(env: Parameters<typeof getAccessToken>[0], pare
   const q = `mimeType='application/vnd.google-apps.folder' and name='${name.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
   const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)`;
   const res = await authedFetch(url, { method: "GET" }, env);
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const data = (await res.json()) as { files: DriveFile[] };
   return data.files[0] ?? null;
 }
@@ -79,7 +96,7 @@ export async function createFolder(env: Parameters<typeof getAccessToken>[0], pa
     },
     env
   );
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   return (await res.json()) as DriveFile;
 }
 
@@ -95,7 +112,7 @@ export async function listChildren(env: Parameters<typeof getAccessToken>[0], fo
     : `'root' in parents and trashed=false`;
   const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)&pageSize=1000&orderBy=folder,name`;
   const res = await authedFetch(url, { method: "GET" }, env);
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const data = (await res.json()) as { files: DriveFile[] };
   return data.files;
 }
@@ -103,7 +120,7 @@ export async function listChildren(env: Parameters<typeof getAccessToken>[0], fo
 export async function getFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<DriveFile> {
   const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime`;
   const res = await authedFetch(url, { method: "GET" }, env);
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   return (await res.json()) as DriveFile;
 }
 
@@ -122,7 +139,7 @@ export async function getBreadcrumb(env: Parameters<typeof getAccessToken>[0], f
 
 export async function deleteFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<void> {
   const res = await authedFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}`, { method: "DELETE" }, env);
-  if (!res.ok && res.status !== 204) throw new HttpError(res.status, await res.text());
+  if (!res.ok && res.status !== 204) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
 }
 
 export async function renameFile(env: Parameters<typeof getAccessToken>[0], fileId: string, name: string): Promise<DriveFile> {
@@ -135,7 +152,7 @@ export async function renameFile(env: Parameters<typeof getAccessToken>[0], file
     },
     env
   );
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   return (await res.json()) as DriveFile;
 }
 
@@ -162,9 +179,9 @@ export async function startResumableUpload(
     },
     env
   );
-  if (!res.ok) throw new HttpError(res.status, await res.text());
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const sessionUri = res.headers.get("Location");
-  if (!sessionUri) throw new HttpError(500, "Drive did not return a Location header.");
+  if (!sessionUri) throw new HttpError(500, "INTERNAL_ERROR", "Drive did not return a Location header.");
   return { sessionUri, totalBytes: args.size };
 }
 
@@ -206,5 +223,5 @@ export async function forwardChunk(
     const body = (await res.json().catch(() => null)) as { id?: string } | null;
     return { acknowledged: args.total, finished: true, driveFileId: body?.id ?? null };
   }
-  throw new HttpError(res.status, await res.text());
+  throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
 }

@@ -6,11 +6,11 @@
  * (header.payload.signature) — verified with Web Crypto.
  */
 
-import type { Profile } from "@pagaska/shared";
+import type { Workspace } from "@pagaska/shared";
 
 export interface JwtPayload {
-  sub: string; // profile id
-  profile: Profile;
+  sub: string; // workspace id
+  workspace: Workspace;
   iat: number;
   exp: number;
 }
