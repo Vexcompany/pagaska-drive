@@ -47,6 +47,7 @@ import {
   Skeleton,
   Modal,
   ErrorBanner,
+  Toast,
 } from "@/components/ui";
 import type {
   DriveFile,
@@ -126,6 +127,32 @@ function DriveInner() {
   const [moveFolders, setMoveFolders] = useState<DriveFolder[]>([]);
   const [moveCrumbs, setMoveCrumbs] = useState<{ id: string; name: string }[]>([]);
   const [moveBusy, setMoveBusy] = useState(false);
+
+  // ── Undo toast for "Move to Trash" ──────────────────────────────────────
+  const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[] }>({
+    visible: false,
+    message: "",
+    undoIds: [],
+  });
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showTrashToast(ids: string[], count: number) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ visible: true, message: `${count} item${count > 1 ? "s" : ""} moved to Trash`, undoIds: ids });
+    toastTimer.current = setTimeout(() => setToast((t) => ({ ...t, visible: false })), 6000);
+  }
+
+  async function undoTrash() {
+    const ids = toast.undoIds;
+    if (ids.length === 0) return;
+    try {
+      await api.restoreItems({ fileIds: ids });
+      setToast({ visible: false, message: "", undoIds: [] });
+      void refresh(folderId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Undo failed.");
+    }
+  }
 
   // ── Helpers: URL-based navigation ───────────────────────────────────────
 
@@ -234,23 +261,25 @@ function DriveInner() {
     }
   }
 
+  /** Move one item to trash (no confirmation). */
   async function deleteOne(id: string) {
-    if (!confirm("Delete this item? This cannot be undone.")) return;
     try {
       await api.deleteFile(id);
+      showTrashToast([id], 1);
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
     }
   }
 
+  /** Move selected items to trash (no confirmation). */
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} item${ids.length > 1 ? "s" : ""}? This cannot be undone.`)) return;
     try {
       for (const id of ids) await api.deleteFile(id);
       setSelected(new Set());
+      showTrashToast(ids, ids.length);
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
@@ -446,6 +475,10 @@ function DriveInner() {
 
           {/* Nav actions */}
           <div className="flex items-center gap-1 shrink-0">
+            <Link href="/trash" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
+              <Trash2 className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Trash</span>
+            </Link>
             <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
                 <Upload className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Upload</span>
@@ -949,6 +982,14 @@ function DriveInner() {
       {showSortMenu && (
         <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />
       )}
+
+      {/* Undo toast for "Move to Trash" */}
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        action={{ label: "UNDO", onClick: undoTrash }}
+        onDismiss={() => setToast((t) => ({ ...t, visible: false }))}
+      />
     </main>
   );
 }
