@@ -70,7 +70,6 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (data?.code) code = data.code;
       if (data?.message) message = data.message;
     } catch {
-      /* non-JSON error body */
     }
     throw new ApiError(res.status, code, message);
   }
