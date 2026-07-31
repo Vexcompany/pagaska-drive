@@ -14,11 +14,6 @@ export interface AuthState {
   workspace: Workspace | null;
   token: string | null;
   loading: boolean;
-  /**
-   * Sign in to a workspace. Password is sent to the Worker and
-   * validated against a Cloudflare secret; it never leaves the
-   * browser for any other purpose.
-   */
   login(workspace: Workspace, password: string): Promise<void>;
   logout(): void;
 }
