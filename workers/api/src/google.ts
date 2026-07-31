@@ -1,5 +1,6 @@
 /**
  * Google Drive API helpers — runs server-side only inside the Worker.
+ *
  * Every function takes the access token explicitly so we can swap it
  * for a fresh one via `getAccessToken` on every request. The browser
  * never sees these tokens.
@@ -77,7 +78,10 @@ export interface DriveFile {
 
 /** Find a folder by name inside a parent. Returns `null` if not found. */
 export async function findFolder(env: Parameters<typeof getAccessToken>[0], parentId: string, name: string): Promise<DriveFile | null> {
-  const q = `mimeType='application/vnd.google-apps.folder' and name='${name.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
+  // Defensive: normalize the name to a string before .replace to
+  // avoid runtime errors if the caller ever passes `undefined`.
+  const safeName = typeof name === "string" ? name : "";
+  const q = `mimeType='application/vnd.google-apps.folder' and name='${safeName.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
   const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)`;
   const res = await authedFetch(url, { method: "GET" }, env);
   if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());

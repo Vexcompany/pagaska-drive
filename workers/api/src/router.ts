@@ -271,9 +271,13 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const file = await getFile(env, fileId);
       // Signed content / thumbnail URL via a one-off access token.
       const accessToken = await getAccessToken(env);
-      const thumbnailUrl = file.thumbnailLink
-        ? file.thumbnailLink.replace(/=s\d+/, "=s1024")
-        : null;
+      // Defensive: `thumbnailLink` is typed as `string | null` but Google
+      // can omit it entirely (in which case the JSON deserializes to
+      // `undefined`). Guard against both before calling `.replace`.
+      const thumbnailUrl =
+        file.thumbnailLink && typeof file.thumbnailLink === "string"
+          ? file.thumbnailLink.replace(/=s\d+/, "=s1024")
+          : null;
       const contentUrl = `${DRIVE}/files/${encodeURIComponent(fileId)}?alt=media&access_token=${encodeURIComponent(accessToken)}`;
       return json(
         {
@@ -351,4 +355,3 @@ async function isInsideRoot(
   }
   return false;
 }
-
