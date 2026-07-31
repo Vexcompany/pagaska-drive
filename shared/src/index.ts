@@ -4,18 +4,30 @@
  * runtimes (browser, edge worker, node tests).
  */
 
-export const PROFILES = ["pagaska", "osama"] as const;
-export type Profile = (typeof PROFILES)[number];
+export const WORKSPACES = ["pagaska", "osama", "pmr"] as const;
+export type Workspace = (typeof WORKSPACES)[number];
 
-export function isProfile(value: unknown): value is Profile {
-  return typeof value === "string" && (PROFILES as readonly string[]).includes(value);
+export function isWorkspace(value: unknown): value is Workspace {
+  return typeof value === "string" && (WORKSPACES as readonly string[]).includes(value);
 }
+
+/**
+ * @deprecated Use `Workspace` instead. The previous `Profile` type
+ * is kept as a type-only alias so older imports continue to typecheck.
+ * The runtime array has been renamed to `WORKSPACES`.
+ */
+export type Profile = Workspace;
+
+/**
+ * @deprecated Use `WORKSPACES` instead.
+ */
+export const PROFILES = WORKSPACES;
 
 export interface AuthSession {
   /** Opaque JWT issued by the Worker. */
   token: string;
-  /** Selected Pagaska profile. */
-  profile: Profile;
+  /** Authenticated workspace. */
+  workspace: Workspace;
   /** Unix epoch seconds. */
   issuedAt: number;
   /** Unix epoch seconds. */
@@ -105,14 +117,37 @@ export interface PreviewResponse {
 }
 
 export interface LoginRequest {
-  /** Profile to sign in as. */
-  profile: Profile;
-  /** Shared passphrase for the demo deployment. Replace with real auth. */
-  passphrase: string;
+  /** Workspace to sign in as. */
+  workspace: Workspace;
+  /** Workspace password, validated server-side against a runtime secret. */
+  password: string;
 }
 
-export interface ApiError {
-  error: string;
+/**
+ * Standardised error envelope returned by every Worker endpoint on
+ * the failure path. Successes continue to return their own typed
+ * payload; this shape is only used for non-2xx responses.
+ */
+export interface ApiErrorResponse {
+  success: false;
+  code: ApiErrorCode;
   message: string;
   status: number;
 }
+
+/**
+ * Machine-readable error codes. Stable across releases so the
+ * frontend can branch on them without parsing messages.
+ */
+export type ApiErrorCode =
+  | "INVALID_LOGIN_PAYLOAD"
+  | "INVALID_CREDENTIALS"
+  | "UNAUTHENTICATED"
+  | "FORBIDDEN"
+  | "INVALID_PAYLOAD"
+  | "MISSING_QUERY_PARAM"
+  | "DRIVE_ERROR"
+  | "INTERNAL_ERROR"
+  | "NOT_FOUND"
+  | "MISSING_CONFIG"
+  | "CONFIG_ERROR";
