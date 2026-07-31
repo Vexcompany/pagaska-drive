@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
-import { api } from "@/lib/api";
+import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
 import {
   Trash2,
   Folder,
@@ -98,7 +98,7 @@ function TrashInner() {
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: DriveFile } | null>(null);
 
-  // Properties dialog.
+  // Properties dialog
   const [propsItem, setPropsItem] = useState<DriveFile | null>(null);
 
   const isSearching = Boolean(query.trim()) && results !== null;
@@ -161,14 +161,48 @@ function TrashInner() {
 
   const ordered = useMemo(() => [...folders, ...files], [folders, files]);
 
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      const isModal = Boolean(propsItem);
+      if (isInput || isModal) {
+        if (e.key === "Escape" && isModal) {
+          e.preventDefault();
+          setPropsItem(null);
+        }
+        return;
+      }
+      if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setSelected(new Set(ordered.map((i) => i.id)));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setSelected(new Set());
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ordered, propsItem]);
+
   // ── Actions ─────────────────────────────────────────────────────────────
 
   async function restoreSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
     try {
-      await api.restoreItems({ fileIds: ids });
+      const result = await batchOperation(
+        ids,
+        async (chunk) => {
+          const res = await api.restoreItems({ fileIds: chunk });
+          return { succeeded: res.restored, failed: res.failed ?? [] };
+        },
+      );
       setSelected(new Set());
+      if (result.failed.length > 0) {
+        setError(`${result.failed.length} item(s) could not be restored.`);
+      }
       void refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Restore failed.");
@@ -190,8 +224,17 @@ function TrashInner() {
     if (ids.length === 0) return;
     if (!confirm(`Permanently delete ${ids.length} item${ids.length > 1 ? "s" : ""}? This cannot be undone.`)) return;
     try {
-      await api.deleteForever({ fileIds: ids });
+      const result = await batchOperation(
+        ids,
+        async (chunk) => {
+          const res = await api.deleteForever({ fileIds: chunk });
+          return { succeeded: res.deleted, failed: res.failed ?? [] };
+        },
+      );
       setSelected(new Set());
+      if (result.failed.length > 0) {
+        setError(`${result.failed.length} item(s) could not be permanently deleted.`);
+      }
       void refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete forever failed.");
@@ -629,4 +672,3 @@ function SkeletonList({ view }: { view: ViewMode }) {
     </div>
   );
 }
-
