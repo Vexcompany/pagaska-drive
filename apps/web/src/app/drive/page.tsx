@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import type { DriveFile, ListFilesResponse } from "@pagaska/shared";
 
 export default function DrivePage() {
-  const { profile, loading, logout } = useAuth();
+  const { workspace, loading, logout } = useAuth();
   const router = useRouter();
   const [folderId, setFolderId] = useState<string | null>(null);
   const [data, setData] = useState<ListFilesResponse | null>(null);
@@ -16,25 +16,29 @@ export default function DrivePage() {
   const [newFolderName, setNewFolderName] = useState("");
   const [renaming, setRenaming] = useState<DriveFile | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [loadingFiles, setLoadingFiles] = useState(false);
 
   const refresh = useCallback(async (id: string | null) => {
+    setLoadingFiles(true);
     try {
       const next = await api.listFiles(id);
       setData(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load files.");
+    } finally {
+      setLoadingFiles(false);
     }
   }, []);
 
   useEffect(() => {
-    if (!loading && !profile) router.replace("/");
-  }, [loading, profile, router]);
+    if (!loading && !workspace) router.replace("/");
+  }, [loading, workspace, router]);
 
   useEffect(() => {
-    if (profile) void refresh(folderId);
-  }, [profile, folderId, refresh]);
+    if (workspace) void refresh(folderId);
+  }, [workspace, folderId, refresh]);
 
-  if (!profile) return null;
+  if (!workspace) return null;
 
   async function createFolder() {
     if (!newFolderName.trim()) return;
@@ -59,9 +63,9 @@ export default function DrivePage() {
 
   return (
     <main className="min-h-screen p-6 max-w-6xl mx-auto">
-      <header className="flex items-center justify-between mb-4">
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-xl font-semibold">Pagaska Drive <span className="text-slate-400">/ {profile}</span></h1>
+          <h1 className="text-xl font-semibold">Pagaska Drive <span className="text-slate-400">/ {workspace}</span></h1>
           <nav className="text-sm text-slate-500 mt-1">
             <Link className="hover:underline" href="/drive">root</Link>
             {data?.breadcrumb.map((c) => (
@@ -69,9 +73,9 @@ export default function DrivePage() {
             ))}
           </nav>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Link className="btn-ghost" href="/upload">Upload</Link>
-          <Link className="btn-ghost" href="/profile">Switch profile</Link>
+          <Link className="btn-ghost" href="/profile">Switch workspace</Link>
           <button onClick={logout} className="btn-ghost">Sign out</button>
         </div>
       </header>
@@ -134,8 +138,16 @@ export default function DrivePage() {
                 </td>
               </tr>
             ))}
-            {data && data.files.length === 0 && data.folders.length === 0 && (
+            {data && data.files.length === 0 && data.folders.length === 0 && !loadingFiles && (
               <tr><td colSpan={5} className="text-center text-slate-400 py-8">This folder is empty.</td></tr>
+            )}
+            {loadingFiles && !data && (
+              <tr>
+                <td colSpan={5} className="text-center text-slate-400 py-8">
+                  <span className="inline-block h-3 w-3 rounded-full border-2 border-slate-300 border-t-brand-500 animate-spin align-middle mr-2" />
+                  Loading…
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
