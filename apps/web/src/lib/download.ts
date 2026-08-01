@@ -4,7 +4,7 @@
  * Authenticated downloads. The Worker's /download endpoints require an
  * Authorization header, but an <a download> click cannot carry headers,
  * so every download is: fetch with auth → blob → object URL → click
- */
+ */ 
 
 import { API_URL, authHeaders } from "./api";
 import type { DriveFile } from "@pagaska/shared";
