@@ -236,6 +236,16 @@ export interface TrashSearchResponse {
   folders: SearchItem[];
 }
 
+/** Storage quota from the Drive about endpoint. */
+export interface StorageResponse {
+  /** Total storage limit in bytes. */
+  limit: number;
+  /** Total bytes used across Drive. */
+  usage: number;
+  /** Bytes used in the workspace. */
+  workspaceUsage: number;
+}
+
 /**
  * Standardised error envelope returned by every Worker endpoint on
  * the failure path. Successes continue to return their own typed
