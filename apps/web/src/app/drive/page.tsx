@@ -60,6 +60,7 @@ import {
   ErrorBanner,
   Toast,
   ContextMenu,
+  ConfirmDialog,
 } from "@/components/ui";
 import type {
   DriveFile,
@@ -145,6 +146,15 @@ function DriveInner() {
 
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: DriveFile } | null>(null);
+
+  // Delete confirmation dialog
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    open: boolean;
+    title: string;
+    message: string;
+    ids: string[];
+  }>({ open: false, title: "", message: "", ids: [] });
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   // Upload drag state
   const [dragOver, setDragOver] = useState(false);
@@ -328,22 +338,41 @@ function DriveInner() {
     }
   }
 
-  async function deleteOne(id: string) {
-    try {
-      await api.deleteFile(id);
-      showTrashToast([id], 1);
-      void refresh(folderId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed.");
-    }
+  // ── Delete with confirmation ─────────────────────────────────────────────
+
+  function requestDeleteOne(item: DriveFile) {
+    const isFolder = item.mimeType === "application/vnd.google-apps.folder";
+    setDeleteConfirm({
+      open: true,
+      title: "Move to Trash",
+      message: isFolder
+        ? `Move folder "${item.name}" to Trash? All files inside this folder will also be moved.`
+        : `Move "${item.name}" to Trash? You can restore it later from Trash.`,
+      ids: [item.id],
+    });
   }
 
-  async function deleteSelected() {
+  function requestDeleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
+    const folderCount = ordered.filter((i) => selected.has(i.id) && i.mimeType === "application/vnd.google-apps.folder").length;
+    const fileCount = ids.length - folderCount;
+    const parts: string[] = [];
+    if (folderCount > 0) parts.push(`${folderCount} folder${folderCount > 1 ? "s" : ""}`);
+    if (fileCount > 0) parts.push(`${fileCount} file${fileCount > 1 ? "s" : ""}`);
+    setDeleteConfirm({
+      open: true,
+      title: "Move to Trash",
+      message: `Move ${parts.join(" and ")} to Trash? Items can be restored later from Trash.`,
+      ids,
+    });
+  }
+
+  async function confirmDelete() {
+    setDeleteBusy(true);
     try {
       const result = await batchOperation(
-        ids,
+        deleteConfirm.ids,
         async (chunk) => {
           const res = await api.trashItems({ fileIds: chunk });
           return { succeeded: res.trashed, failed: res.failed ?? [] };
@@ -357,6 +386,9 @@ function DriveInner() {
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
+    } finally {
+      setDeleteBusy(false);
+      setDeleteConfirm((d) => ({ ...d, open: false }));
     }
   }
 
@@ -513,7 +545,7 @@ function DriveInner() {
         e.preventDefault();
         setSelected(new Set());
       } else if (e.key === "Delete" || e.key === "Backspace") {
-        if (selected.size > 0) { e.preventDefault(); void deleteSelected(); }
+        if (selected.size > 0) { e.preventDefault(); requestDeleteSelected(); }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -581,7 +613,7 @@ function DriveInner() {
         showToast("Folder cover updated");
       }
     }] : []),
-    { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteOne(ctxMenu.item.id), danger: true },
+    { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => requestDeleteOne(ctxMenu.item), danger: true },
   ] : [];
 
   return (
@@ -789,7 +821,7 @@ function DriveInner() {
               {selectedCount} selected
             </span>
             <div className="h-4 w-px bg-brand-200" />
-            <Button variant="danger" size="sm" onClick={() => void deleteSelected()}>
+            <Button variant="danger" size="sm" onClick={() => requestDeleteSelected()}>
               <Trash2 className="h-3.5 w-3.5" />
               Delete
             </Button>
@@ -917,7 +949,7 @@ function DriveInner() {
                               <LinkIcon className="h-3.5 w-3.5" />
                             </button>
                             <button
-                              onClick={(e) => { e.stopPropagation(); void deleteOne(item.id); }}
+                              onClick={(e) => { e.stopPropagation(); requestDeleteOne(item); }}
                               className="rounded-lg p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all"
                               title="Delete"
                             >
@@ -1173,6 +1205,17 @@ function DriveInner() {
         message={toast.restoring ? "Restoring…" : toast.message}
         action={toast.restoring ? undefined : { label: "UNDO", onClick: undoTrash }}
         onDismiss={() => { if (!toast.restoring) setToast((t) => ({ ...t, visible: false })); }}
+      />
+
+      {/* Delete confirmation dialog */}
+      <ConfirmDialog
+        open={deleteConfirm.open}
+        title={deleteConfirm.title}
+        message={deleteConfirm.message}
+        confirmLabel="Move to Trash"
+        loading={deleteBusy}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteConfirm((d) => ({ ...d, open: false }))}
       />
     </main>
   );
