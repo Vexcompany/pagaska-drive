@@ -13,6 +13,7 @@ import { showToast } from "@/stores/useToastStore";
 import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
 import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
 import { PropertiesPanel } from "@/components/PropertiesPanel";
+import { StorageIndicator } from "@/components/StorageIndicator";
 import {
   Folder,
   FileText,
@@ -49,6 +50,7 @@ import {
   ImagePlus,
   CloudUpload,
   Eye,
+  Clipboard,
 } from "lucide-react";
 import {
   Button,
@@ -120,6 +122,32 @@ function DriveInner() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+
+  // Recent search history (localStorage only)
+  const RECENT_SEARCH_KEY = "pagaska.recentSearches";
+  const [recentSearches, setRecentSearches] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(RECENT_SEARCH_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+
+  function saveRecentSearch(q: string) {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    setRecentSearches((prev) => {
+      const next = [trimmed, ...prev.filter((s) => s.toLowerCase() !== trimmed.toLowerCase())].slice(0, 8);
+      try { window.localStorage.setItem(RECENT_SEARCH_KEY, JSON.stringify(next)); } catch { /* */ }
+      return next;
+    });
+  }
+
+  function clearRecentSearches() {
+    setRecentSearches([]);
+    try { window.localStorage.removeItem(RECENT_SEARCH_KEY); } catch { /* */ }
+  }
 
   const [view, setView] = useState<ViewMode>(() => readLocal<ViewMode>(VIEW_KEY, "list"));
   const [sortKey, setSortKey] = useState<SortKey>(() => readLocal<SortKey>(SORT_KEY, "name"));
@@ -297,7 +325,7 @@ function DriveInner() {
     setSearching(true);
     const t = window.setTimeout(() => {
       api.search(q)
-        .then((r) => setResults(r))
+        .then((r) => { setResults(r); saveRecentSearch(q); })
         .catch((err) => setError(err instanceof Error ? err.message : "Search failed."))
         .finally(() => setSearching(false));
     }, 180);
@@ -606,6 +634,17 @@ function DriveInner() {
     { label: "Move", icon: <MoveRight className="h-4 w-4" />, onClick: () => { setMoveTargets([ctxMenu.item.id]); setMoveOpen(true); } },
     { label: "Download", icon: <Download className="h-4 w-4" />, onClick: () => void downloadSelected([ctxMenu.item]) },
     { label: "Properties", icon: <Info className="h-4 w-4" />, onClick: () => setPropsItem(ctxMenu.item) },
+    // Copy Path — build from breadcrumb + item name
+    { label: "Copy Path", icon: <Clipboard className="h-4 w-4" />, onClick: () => {
+      const pathParts = data?.breadcrumb.map((c) => c.name) ?? [];
+      pathParts.push(ctxMenu.item.name);
+      const pathStr = pathParts.join("/");
+      navigator.clipboard.writeText(pathStr).then(() => {
+        showToast("Path copied");
+      }).catch(() => {
+        showToast("Path: " + pathStr, { type: "info" });
+      });
+    }},
     // Set as Folder Cover — only for images
     ...(ctxMenu.item.mimeType.startsWith("image/") && ctxMenu.item.thumbnailLink && folderId ? [{
       label: "Set as Folder Cover", icon: <ImagePlus className="h-4 w-4" />, onClick: () => {
@@ -687,6 +726,7 @@ function DriveInner() {
               <User className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Workspace</span>
             </Link>
+            <StorageIndicator />
             <button
               onClick={logout}
               className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all"
@@ -708,10 +748,36 @@ function DriveInner() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => { setTimeout(() => setSearchFocused(false), 200); }}
               placeholder="Search files and folders…"
               className="w-full pl-9 pr-10 py-2 text-sm rounded-xl border border-slate-200 bg-white shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-100 transition-all placeholder:text-slate-400"
               aria-label="Search"
             />
+            {/* Recent searches dropdown */}
+            {searchFocused && !searchQuery && recentSearches.length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-1 z-30 rounded-xl bg-white shadow-xl ring-1 ring-slate-200 overflow-hidden animate-pop-in">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+                  <span className="text-xs font-medium text-slate-500">Recent searches</span>
+                  <button
+                    onClick={clearRecentSearches}
+                    className="text-xs text-slate-400 hover:text-red-500 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+                {recentSearches.map((s) => (
+                  <button
+                    key={s}
+                    onMouseDown={(e) => { e.preventDefault(); setQuery(s); }}
+                    className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2"
+                  >
+                    <Search className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
             {searching && (
               <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-brand-400 animate-spin" />
             )}
@@ -922,7 +988,7 @@ function DriveInner() {
                               className="truncate font-medium text-slate-800 hover:text-brand-600 hover:underline text-left"
                               title={item.name}
                             >
-                              {item.name}
+                              <HighlightText text={item.name} query={searchQuery} />
                             </button>
                             {isSearching && (item as DriveFile & { path?: string | null }).path && (
                               <span className="text-xs text-slate-400 truncate shrink-0">· {(item as DriveFile & { path?: string | null }).path}</span>
@@ -1025,7 +1091,7 @@ function DriveInner() {
                       className="text-xs font-medium truncate w-full text-center text-slate-800 hover:text-brand-600 hover:underline leading-tight"
                       title={item.name}
                     >
-                      {item.name}
+                      <HighlightText text={item.name} query={searchQuery} />
                     </button>
                     <div className="text-xs text-slate-400 mt-0.5">
                       {isFolder ? "Folder" : formatSize(item.size)}
@@ -1219,6 +1285,29 @@ function DriveInner() {
       />
     </main>
   );
+}
+
+// ── Search highlight helper ──────────────────────────────────────────────────
+
+/**
+ * Highlights matching substrings in text by wrapping them in a <mark>.
+ * Case-insensitive matching.  Returns an array of React nodes.
+ */
+function HighlightText({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let idx = lower.indexOf(q, lastIdx);
+  while (idx !== -1) {
+    if (idx > lastIdx) parts.push(text.substring(lastIdx, idx));
+    parts.push(<mark key={idx} className="bg-brand-200/70 text-brand-900 rounded-sm px-0.5">{text.substring(idx, idx + q.length)}</mark>);
+    lastIdx = idx + q.length;
+    idx = lower.indexOf(q, lastIdx);
+  }
+  if (lastIdx < text.length) parts.push(text.substring(lastIdx));
+  return <>{parts}</>;
 }
 
 // ── Icon helpers ─────────────────────────────────────────────────────────────
