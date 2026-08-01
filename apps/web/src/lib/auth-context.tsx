@@ -4,7 +4,7 @@
  * Auth context — created in its own client-only module so the context
  * object and the hook are guaranteed to come from the same React
  * instance on the client. The provider lives in `providers.tsx` so the
- * root `layout.tsx` has a single, clean client boundary.
+ * root `layout.tsx` has a single, clean client boundary. 
  */
 
 import { createContext, useContext } from "react";
