@@ -84,6 +84,19 @@ export function FloatingUploadPanel() {
   // Expanded panel
   const pct = snapshot ? snapshot.fraction * 100 : 0;
 
+  // Compute completion summary
+  const completedFiles = files.filter((f) => f.state === "completed");
+  const completedFolders = new Set(
+    completedFiles
+      .map((f) => {
+        // Files with paths like "folder/subfolder/file.txt" belong to a folder
+        const parts = f.relativePath.split("/");
+        return parts.length > 1 ? parts[0] : null;
+      })
+      .filter(Boolean)
+  ).size;
+  const standaloneFiles = completedFiles.filter((f) => !f.relativePath.includes("/")).length;
+
   return (
     <div className="fixed bottom-4 right-4 z-40 w-96 max-w-[calc(100vw-2rem)] animate-pop-in">
       <div className="rounded-2xl bg-white shadow-xl ring-1 ring-slate-200 overflow-hidden">
@@ -119,6 +132,28 @@ export function FloatingUploadPanel() {
             )}
           </div>
         </div>
+
+        {/* Completion summary */}
+        {allDone && completedFiles.length > 0 && (
+          <div className="px-4 py-3 border-b border-slate-50 bg-emerald-50/50">
+            <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+              All uploads completed
+            </div>
+            <div className="flex items-center gap-3 mt-1 text-xs text-emerald-600">
+              {completedFolders > 0 && (
+                <span>{completedFolders} folder{completedFolders > 1 ? "s" : ""}</span>
+              )}
+              {standaloneFiles > 0 && (
+                <span>{standaloneFiles} file{standaloneFiles > 1 ? "s" : ""}</span>
+              )}
+              {completedFolders > 0 && standaloneFiles > 0 && (
+                <span className="text-emerald-400">·</span>
+              )}
+              <span className="text-emerald-500">{formatSize(snapshot?.uploadedBytes ?? 0)}</span>
+            </div>
+          </div>
+        )}
 
         {/* Overall progress */}
         {snapshot && snapshot.totalFiles > 0 && (
