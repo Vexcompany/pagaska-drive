@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -14,6 +14,7 @@ import {
   CloudUpload,
   CheckCircle2,
   AlertCircle,
+  Loader2,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { addFilesToPanel, useUploadPanel } from "@/hooks/useUploadPanel";
@@ -21,16 +22,36 @@ import { Button, Card, StatusBadge, ProgressBar, ErrorBanner } from "@/component
 import { formatSize, formatSpeed, formatRemaining } from "@/lib/format";
 
 /**
- * Upload page — full upload experience with drag-and-drop,
- * file/folder choosers, per-file progress, and the floating panel.
+ * Upload page — acts as an upload launcher.
  *
- * Files are added to the shared upload panel so uploads continue
- * even if the user navigates away. The page also shows the full
- * in-page progress UI for users who stay on the page.
+ * Expected flow:
+ *   Drive → Click Upload → Navigate to /upload
+ *   → Choose files or folder
+ *   → Files are added to the shared upload panel
+ *   → Navigate back to /drive
+ *   → Floating Upload Panel shows progress
+ *   → Upload continues while browsing
+ *
+ * The folderId is passed as a query parameter so uploads land in the
+ * correct directory. Drag-and-drop is also supported.
  */
 export default function UploadPage() {
+  return (
+    <Suspense fallback={
+      <main className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-brand-400" />
+      </main>
+    }>
+      <UploadInner />
+    </Suspense>
+  );
+}
+
+function UploadInner() {
   const { workspace, loading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const folderId = useMemo(() => searchParams.get("folderId") ?? null, [searchParams]);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,8 +66,11 @@ export default function UploadPage() {
   const handleFiles = useCallback((rawFiles: File[]) => {
     if (rawFiles.length === 0) return;
     setError(null);
-    addFilesToPanel(rawFiles, null);
-  }, []);
+    addFilesToPanel(rawFiles, folderId);
+    // Navigate back to drive so the user sees the upload panel
+    // and the directory auto-refreshes on completion.
+    router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+  }, [folderId, router]);
 
   function onFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const list = e.target.files;
