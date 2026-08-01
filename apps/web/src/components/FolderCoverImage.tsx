@@ -3,7 +3,7 @@
 /**
  * FolderCoverImage — renders a folder's cover image if one is set,
  * or falls back to the first image in the folder. If no images exist,
- * shows nothing (the parent component renders the folder icon).
+ * shows nothing (the parent component renders the folder icon)
  */
 
 import { useMemo } from "react";
