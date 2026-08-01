@@ -1312,7 +1312,7 @@ function EmptyState({ searching, query, atRoot, onClear, onUpload }: { searching
   );
 }
 
-// ── File system entry helpers for drag & drop ────────────────────────────────
+// ── File system entry helpers for drag & drop ──────────────────────────────── 
 
 interface PagaskaFsEntry {
   isFile: boolean;
