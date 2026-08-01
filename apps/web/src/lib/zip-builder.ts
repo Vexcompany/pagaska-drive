@@ -1,6 +1,5 @@
 /**
  * Minimal client-side ZIP builder.
- *
  * Uses the APPNOTE specification to create a valid ZIP file
  * without any external dependencies. Supports STORE (no compression)
  * and DEFLATE via the browser's CompressionStream API where available.
