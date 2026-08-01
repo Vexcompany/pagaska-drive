@@ -636,24 +636,10 @@ function DriveInner() {
               <Trash2 className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Trash</span>
             </Link>
-            <label className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm cursor-pointer">
+            <Link href={folderId ? `/upload?folderId=${encodeURIComponent(folderId)}` : "/upload"} className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
               <Upload className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Upload</span>
-              <input type="file" multiple className="hidden" onChange={onFileInput} />
-            </label>
-            <label className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all cursor-pointer" title="Upload folder">
-              <FolderPlus className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Folder</span>
-              <input
-                type="file"
-                multiple
-                // @ts-expect-error — non-standard but supported by all evergreen browsers
-                webkitdirectory=""
-                directory=""
-                className="hidden"
-                onChange={onFileInput}
-              />
-            </label>
+            </Link>
             <Link href="/profile" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
               <User className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Workspace</span>
@@ -1312,7 +1298,7 @@ function EmptyState({ searching, query, atRoot, onClear, onUpload }: { searching
   );
 }
 
-// ── File system entry helpers for drag & drop ──────────────────────────────── 
+// ── File system entry helpers for drag & drop ────────────────────────────────
 
 interface PagaskaFsEntry {
   isFile: boolean;
