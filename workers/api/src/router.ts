@@ -206,7 +206,26 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     }
 
     // ------- TRASH -------
-    // GET /trash — list all trashed items in the workspace
+    // GET /trash — list top-level trashed items in the workspace
+    //
+    // When a folder is trashed in Google Drive, the folder AND all its
+    // descendants are marked trashed.  If we return every trashed item,
+    // the Trash UI shows a flattened list where children appear as
+    // separate items alongside their parent folder.  This breaks:
+    //   1. The Trash UI — children should be inside the folder, not at top level
+    //   2. Permanent Delete — deleting the folder already deletes children,
+    //      so subsequent delete calls on children fail with "item not found"
+    //   3. Restore — restoring children individually may fail or put them
+    //      in the wrong location
+    //
+    // FIX: Only return items whose parent is NOT trashed.  This means:
+    //   - A trashed folder whose parent is the workspace root → shown
+    //   - A trashed file inside a trashed folder → hidden (it's inside the folder)
+    //   - A trashed file whose parent folder is NOT trashed → shown
+    //
+    // The check is: for each trashed item, look up its parent.  If the
+    // parent is also trashed, skip the item — it's a descendant of a
+    // trashed folder and will be shown/restored/deleted with the folder.
     if (path === "/trash" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const rootFolderId = await getWorkspaceRootFolderId(env, workspace);
@@ -219,7 +238,28 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       for (let i = 0; i < limit; i++) {
         const item = allTrashed[i];
         const inside = await isInsideRoot(item, env.GOOGLE_DRIVE_ROOT, workspace, env, cache);
-        if (inside) scoped.push(item);
+        if (!inside) continue;
+        // Check if the item's parent is also trashed.  If so, the item
+        // is a descendant of a trashed folder and should be hidden —
+        // it will be shown/restored/deleted with the folder.
+        const parentId = item.parents?.[0];
+        if (parentId) {
+          let parent: Awaited<ReturnType<typeof getFile>> | undefined = cache.get(parentId);
+          if (!parent) {
+            try {
+              parent = await getFile(env, parentId);
+              cache.set(parentId, parent);
+            } catch {
+              // Parent might be already deleted — treat as top-level
+              parent = undefined;
+            }
+          }
+          if (parent && parent.trashed) {
+            // Parent is trashed → this item is inside a trashed folder → skip
+            continue;
+          }
+        }
+        scoped.push(item);
       }
       const folders = scoped.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
       const files = scoped.filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
@@ -249,16 +289,49 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     // For trashed items, skip the expensive isInsideRoot walk and just
     // verify the file is actually trashed.  Items were scoped to the
     // workspace when they were listed via GET /trash.
+    //
+    // IMPORTANT: When a folder is restored, Google Drive automatically
+    // restores all its descendants.  If the batch contains both a folder
+    // and its children, the children may already be un-trashed by the
+    // time we try to restore them.  Treat already-untrashed items as
+    // success (they were restored as part of the folder cascade).
     if (path === "/trash/restore" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null));
       const fileIds = validateBatchIds(body);
-      let restored = 0;
-      const failed: string[] = [];
+      // Restore folders first so children are auto-restored
+      const folderIds: string[] = [];
+      const nonFolderIds: string[] = [];
+      const fileCache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       for (const fileId of fileIds) {
         try {
           const file = await getFile(env, fileId);
-          if (!file.trashed) { failed.push(fileId); continue; }
+          fileCache.set(fileId, file);
+          if (file.mimeType === "application/vnd.google-apps.folder") {
+            folderIds.push(fileId);
+          } else {
+            nonFolderIds.push(fileId);
+          }
+        } catch { /* will be caught below */ }
+      }
+      let restored = 0;
+      const failed: string[] = [];
+      // Restore folders first — they cascade-restore children
+      for (const fileId of folderIds) {
+        try {
+          const file = fileCache.get(fileId);
+          if (!file) { failed.push(fileId); continue; }
+          if (!file.trashed) { restored += 1; continue; } // already restored
+          await restoreFile(env, fileId);
+          restored += 1;
+        } catch { failed.push(fileId); }
+      }
+      // Restore non-folder items — may already be restored via folder cascade
+      for (const fileId of nonFolderIds) {
+        try {
+          const file = fileCache.get(fileId);
+          if (!file) { failed.push(fileId); continue; }
+          if (!file.trashed) { restored += 1; continue; } // already restored (cascade)
           await restoreFile(env, fileId);
           restored += 1;
         } catch { failed.push(fileId); }
@@ -270,19 +343,60 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     // For trashed items, skip the expensive isInsideRoot walk and just
     // verify the file is actually trashed.  This keeps each item at 2
     // subrequests (getFile + deleteFile) instead of 4-7.
+    //
+    // IMPORTANT: When a folder is deleted, Google Drive automatically
+    // deletes all its descendants.  If the batch contains both a folder
+    // and its children, the children will fail because they were already
+    // deleted when the folder was deleted.  To prevent this, we:
+    //   1. First pass: collect all folder IDs and delete them
+    //   2. Second pass: try to delete remaining items, treating 404 as
+    //      success (already deleted as part of a folder)
     if (path === "/trash" && request.method === "DELETE") {
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null));
       const fileIds = validateBatchIds(body);
       let deleted = 0;
       const failed: string[] = [];
+      // Phase 1: delete folders first (they cascade-delete children)
+      const folderIds: string[] = [];
+      const nonFolderIds: string[] = [];
+      const fileCache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       for (const fileId of fileIds) {
         try {
           const file = await getFile(env, fileId);
+          fileCache.set(fileId, file);
           if (!file.trashed) { failed.push(fileId); continue; }
+          if (file.mimeType === "application/vnd.google-apps.folder") {
+            folderIds.push(fileId);
+          } else {
+            nonFolderIds.push(fileId);
+          }
+        } catch { failed.push(fileId); }
+      }
+      // Delete folders first — each one cascades to its children
+      for (const fileId of folderIds) {
+        try {
           await deleteFile(env, fileId);
           deleted += 1;
         } catch { failed.push(fileId); }
+      }
+      // Delete non-folder items — if a 404 is returned, the item was
+      // already deleted as part of a folder's cascade.  Count as success.
+      for (const fileId of nonFolderIds) {
+        try {
+          const file = fileCache.get(fileId);
+          if (file && !file.trashed) { failed.push(fileId); continue; }
+          await deleteFile(env, fileId);
+          deleted += 1;
+        } catch (e) {
+          // If the error is a 404, the file was already deleted as part
+          // of a folder cascade — count as success, not failure.
+          if (e instanceof HttpError && e.status === 404) {
+            deleted += 1;
+          } else {
+            failed.push(fileId);
+          }
+        }
       }
       return json({ ok: true, deleted, failed }, {}, origin);
     }
