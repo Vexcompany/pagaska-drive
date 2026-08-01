@@ -59,6 +59,18 @@ export interface ListFilesResponse {
   folders: DriveFolder[];
   /** Resolved path segments for breadcrumb rendering. */
   breadcrumb: { id: string; name: string }[];
+  /** Statistics for the current folder (file count, folder count, total size). */
+  stats?: FolderStats;
+}
+
+/** Statistics for a folder's direct children. */
+export interface FolderStats {
+  /** Number of files (non-folder items) in the folder. */
+  fileCount: number;
+  /** Number of sub-folders in the folder. */
+  folderCount: number;
+  /** Total size of all files in the folder (bytes). */
+  totalSize: number;
 }
 
 export interface StartUploadRequest {
