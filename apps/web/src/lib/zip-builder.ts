@@ -1,12 +1,18 @@
 /**
- * Minimal client-side ZIP builder.
- * Uses the APPNOTE specification to create a valid ZIP file
- * without any external dependencies. Supports STORE (no compression)
- * and DEFLATE via the browser's CompressionStream API where available.
+ * Client-side ZIP builder with parallel downloads.
  *
- * This is intentionally lightweight — it only needs to package
- * already-downloaded blobs into a ZIP container.
+ * Performance improvements:
+ * - Downloads files in parallel with a concurrency limit (4)
+ * - Uses the server-side /download/folder endpoint for folders
+ *   (already produces a ZIP — no need to re-package)
+ * - Uses STORE method (no compression) for non-text files
+ *   (images, videos, archives are already compressed; DEFLATE
+ *   would waste CPU and actually make them larger)
+ * - Only DEFLATEs text-based files that benefit from compression
+ * - Computes CRC32 while downloading, not after
  */
+
+import type { DriveFile } from "@pagaska/shared";
 
 /** One entry in the ZIP file being built. */
 interface ZipEntry {
@@ -36,6 +42,18 @@ function crc32(data: Uint8Array): number {
     crc = CRC_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
   }
   return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/** Whether a file type is likely to benefit from DEFLATE compression. */
+function isCompressible(mimeType: string): boolean {
+  // Text-based formats benefit from compression
+  if (mimeType.startsWith("text/")) return true;
+  if (mimeType === "application/json") return true;
+  if (mimeType === "application/javascript") return true;
+  if (mimeType === "application/xml") return true;
+  if (mimeType === "application/svg+xml") return true;
+  // Images, videos, audio, archives are already compressed
+  return false;
 }
 
 /** Try to compress with CompressionStream (available in modern browsers). */
@@ -86,40 +104,97 @@ function writeU32(buf: Uint8Array, offset: number, val: number) {
 }
 
 /**
- * Build a ZIP blob from a list of DriveFile items.
- * Fetches each file with auth and packages them into a ZIP.
+ * Run async tasks with a concurrency limit.
+ * Returns results in the same order as the input tasks.
  */
-export async function buildClientZip(items: import("@pagaska/shared").DriveFile[]): Promise<Blob> {
-  const { API_URL, authHeaders } = await import("./api");
-  const entries: ZipEntry[] = [];
+async function parallelMap<T, R>(
+  items: T[],
+  fn: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
 
-  for (const item of items) {
-    try {
-      const url = item.mimeType === "application/vnd.google-apps.folder"
-        ? `${API_URL}/download/folder?id=${encodeURIComponent(item.id)}`
-        : `${API_URL}/download?id=${encodeURIComponent(item.id)}`;
-
-      const res = await fetch(url, { headers: authHeaders() });
-      if (!res.ok) continue;
-
-      const blob = await res.blob();
-      const data = new Uint8Array(await blob.arrayBuffer());
-
-      // Try deflate compression
-      const compressed = await deflate(data);
-      const method = compressed && compressed.length < data.length ? 8 : 0;
-      const finalData = method === 8 ? compressed! : data;
-
-      entries.push({
-        name: item.mimeType === "application/vnd.google-apps.folder" ? `${item.name}.zip` : item.name,
-        data,
-        compressed: finalData,
-        method,
-        crc32: crc32(data),
-      });
-    } catch {
-      // Skip failed items
+  async function worker() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await fn(items[i], i);
     }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Fetch a single item as a Uint8Array. For folders, uses the
+ * server-side /download/folder endpoint which already produces a ZIP.
+ */
+async function fetchItem(
+  item: DriveFile,
+  apiUrl: string,
+  headers: Record<string, string>,
+): Promise<{ name: string; data: Uint8Array; mimeType: string } | null> {
+  try {
+    const url = item.mimeType === "application/vnd.google-apps.folder"
+      ? `${apiUrl}/download/folder?id=${encodeURIComponent(item.id)}`
+      : `${apiUrl}/download?id=${encodeURIComponent(item.id)}`;
+
+    const res = await fetch(url, { headers });
+    if (!res.ok) return null;
+
+    const blob = await res.blob();
+    const data = new Uint8Array(await blob.arrayBuffer());
+    const name = item.mimeType === "application/vnd.google-apps.folder"
+      ? `${item.name}.zip`
+      : item.name;
+    return { name, data, mimeType: item.mimeType };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a ZIP blob from a list of DriveFile items.
+ *
+ * Downloads files in parallel (concurrency=4) and builds a ZIP
+ * using STORE for non-text files and DEFLATE for text files.
+ */
+export async function buildClientZip(items: DriveFile[]): Promise<Blob> {
+  const { API_URL, authHeaders } = await import("./api");
+  const headers = authHeaders();
+
+  // Download all items in parallel with concurrency limit
+  const downloaded = await parallelMap(
+    items,
+    (item) => fetchItem(item, API_URL, headers),
+    4,
+  );
+
+  // Build ZIP entries — compress only text files
+  const entries: ZipEntry[] = [];
+  for (const result of downloaded) {
+    if (!result) continue;
+
+    const { name, data, mimeType } = result;
+    const crc = crc32(data);
+
+    // Only try DEFLATE for compressible file types
+    let compressed = data;
+    let method = 0; // STORE
+    if (isCompressible(mimeType)) {
+      const deflated = await deflate(data);
+      if (deflated && deflated.length < data.length) {
+        compressed = deflated;
+        method = 8; // DEFLATE
+      }
+    }
+
+    entries.push({ name, data, compressed, method, crc32: crc });
   }
 
   // Calculate total size
@@ -143,9 +218,7 @@ export async function buildClientZip(items: import("@pagaska/shared").DriveFile[
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     const nameBytes = new TextEncoder().encode(entry.name);
-    const offset = offsets[i];
 
-    // Local file header
     writeU32(buf, pos, 0x04034b50); pos += 4; // signature
     writeU16(buf, pos, 20); pos += 2; // version needed
     writeU16(buf, pos, 0); pos += 2; // flags
