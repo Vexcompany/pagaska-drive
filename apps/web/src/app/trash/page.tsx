@@ -5,6 +5,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
+import { formatSize, formatDate, typeLabel } from "@/lib/format";
+import { PropertiesPanel } from "@/components/PropertiesPanel";
 import {
   Trash2,
   Folder,
@@ -297,7 +299,6 @@ function TrashInner() {
 
   return (
     <main className="min-h-screen bg-slate-50">
-      {/* Top nav */}
       <header className="sticky top-0 z-20 bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
           <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -326,7 +327,6 @@ function TrashInner() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-5 space-y-4">
         {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
-        {/* Toolbar */}
         <div className="flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
@@ -377,7 +377,6 @@ function TrashInner() {
           </div>
         </div>
 
-        {/* Selection bar */}
         {selectedCount > 0 && (
           <Card className="px-4 py-2.5 flex flex-wrap items-center gap-2 animate-pop-in border-brand-100 bg-brand-50/50">
             <span className="text-sm font-medium text-brand-700 mr-1">{selectedCount} selected</span>
@@ -394,7 +393,6 @@ function TrashInner() {
           </Card>
         )}
 
-        {/* Content */}
         <Card className="overflow-hidden">
           {loadingFiles && !data && <SkeletonList view={view} />}
           {!loadingFiles && ordered.length === 0 && (
@@ -407,7 +405,6 @@ function TrashInner() {
             </div>
           )}
 
-          {/* List view */}
           {ordered.length > 0 && view === "list" && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -485,7 +482,6 @@ function TrashInner() {
             </div>
           )}
 
-          {/* Grid view */}
           {ordered.length > 0 && view === "grid" && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 p-4">
               {ordered.map((item, i) => {
@@ -535,51 +531,21 @@ function TrashInner() {
             { label: "Restore", icon: <RotateCcw className="h-4 w-4" />, onClick: () => void restoreOne(ctxMenu.item.id) },
             { label: "Delete forever", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteForeverOne(ctxMenu.item.id, ctxMenu.item.name), danger: true },
             { label: "Properties", icon: <Info className="h-4 w-4" />, onClick: () => setPropsItem(ctxMenu.item) },
-            { label: "Share", icon: <LinkIcon className="h-4 w-4" />, onClick: () => {}, disabled: true },
-            { label: "Rename", icon: <Pencil className="h-4 w-4" />, onClick: () => {}, disabled: true },
-            { label: "Move", icon: <MoveRight className="h-4 w-4" />, onClick: () => {}, disabled: true },
           ]}
           onClose={() => setCtxMenu(null)}
         />
       )}
 
-      {/* Properties dialog */}
-      <Modal open={Boolean(propsItem)} onClose={() => setPropsItem(null)} className="max-w-sm">
-        <Card className="p-5">
-          <h2 className="font-semibold text-slate-900 mb-4">Properties</h2>
-          {propsItem && (
-            <div className="space-y-3 text-sm">
-              <div className="flex justify-between">
-                <span className="text-slate-500">Name</span>
-                <span className="text-slate-900 font-medium truncate max-w-[16rem]">{propsItem.name}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Type</span>
-                <span className="text-slate-700">{propsItem.mimeType === "application/vnd.google-apps.folder" ? "Folder" : typeLabel(propsItem.mimeType)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Size</span>
-                <span className="text-slate-700">{propsItem.mimeType === "application/vnd.google-apps.folder" ? "—" : formatSize(propsItem.size)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Status</span>
-                <Badge color="red" dot>In Trash</Badge>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Deleted date</span>
-                <span className="text-slate-700">{formatDate(propsItem.modifiedTime)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">ID</span>
-                <span className="text-slate-400 font-mono text-xs truncate max-w-[16rem]">{propsItem.id}</span>
-              </div>
-            </div>
-          )}
-          <div className="flex justify-end gap-2 mt-5">
-            <Button variant="ghost" onClick={() => setPropsItem(null)}>Close</Button>
-          </div>
-        </Card>
-      </Modal>
+      {/* Properties panel */}
+      {propsItem && data && (
+        <PropertiesPanel
+          item={propsItem}
+          breadcrumb={data.breadcrumb}
+          workspace={workspace}
+          folderId={null}
+          onClose={() => setPropsItem(null)}
+        />
+      )}
 
       {/* Close sort menu on outside click */}
       {showSortMenu && <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />}
@@ -626,25 +592,6 @@ function compareItems(a: DriveFile, b: DriveFile, key: SortKey, dir: SortDir): n
     case "type": r = typeLabel(a.mimeType).localeCompare(typeLabel(b.mimeType)); break;
   }
   return dir === "asc" ? r : -r;
-}
-
-function typeLabel(mime: string): string { return mime.split("/").pop() ?? mime; }
-
-function formatSize(bytes: string | number | null): string {
-  if (bytes == null) return "—";
-  const n = typeof bytes === "string" ? Number(bytes) : bytes;
-  if (!Number.isFinite(n)) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 function SkeletonList({ view }: { view: ViewMode }) {
