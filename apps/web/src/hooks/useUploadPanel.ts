@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createEngine, toUploadSources } from "@/lib/engine";
 import type { ProgressSnapshot, UploadFileSnapshot, UploadEngine } from "@pagaska/upload-engine";
 
-// ── Module level singleton ──────────────────────────────────────────────
+// ── Module-level singleton ──────────────────────────────────────────────
 
 interface UploadPanelState {
   engine: UploadEngine | null;
