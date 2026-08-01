@@ -4,13 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api";
+import { PENDING_SWITCH_KEY } from "@/lib/providers";
 import { WORKSPACES, type Workspace } from "@pagaska/shared";
 import { Loader2, Eye, EyeOff, HardDrive, TriangleAlert } from "lucide-react";
 
 export default function LoginPage() {
   const { workspace, loading, login } = useAuth();
   const router = useRouter();
-  const [selected, setSelected] = useState<Workspace>("pagaska");
+  const [selected, setSelected] = useState<Workspace>(() => {
+    if (typeof window === "undefined") return "pagaska" as Workspace;
+    const hint = window.localStorage.getItem(PENDING_SWITCH_KEY);
+    return (hint as Workspace) ?? ("pagaska" as Workspace);
+  });
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -20,6 +25,12 @@ export default function LoginPage() {
   useEffect(() => {
     if (!loading && workspace) router.replace("/drive");
   }, [loading, workspace, router]);
+
+  // Consume the workspace switch hint on mount so it doesn't persist
+  // if the user navigates away and comes back.
+  useEffect(() => {
+    try { window.localStorage.removeItem(PENDING_SWITCH_KEY); } catch { /* */ }
+  }, []);
 
   const [knownWorkspaces, setKnownWorkspaces] = useState<readonly Workspace[]>(WORKSPACES);
   useEffect(() => {
