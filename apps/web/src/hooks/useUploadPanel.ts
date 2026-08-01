@@ -2,7 +2,7 @@
 
 /**
  * Upload panel hook — manages the floating upload panel state.
- * The panel persists across page navigation so uploads continue 
+ * The panel persists across page navigation so uploads continue
  * while the user browses. The state is stored in a module-level
  * singleton so it survives React re-renders and route changes.
  */
@@ -34,7 +34,35 @@ const singleton: UploadPanelState = {
 type Listener = () => void;
 const listeners = new Set<Listener>();
 
+// ── Completion versioning ───────────────────────────────────────────────
+// Incremented per-folder when uploads transition from active → all done.
+// The drive page watches this to silently re-fetch the current directory.
+const completionVersion: Record<string, number> = {};
+let prevAllDone = false;
+
+function updateCompletion() {
+  const isActive = singleton.files.some(
+    (f) => f.state === "uploading" || f.state === "queued" || f.state === "paused" || f.state === "retrying"
+  );
+  const allDone =
+    !isActive &&
+    singleton.files.length > 0 &&
+    singleton.files.every((f) => f.state === "completed" || f.state === "failed");
+
+  if (allDone && !prevAllDone) {
+    // Only signal when at least one file succeeded — no point refreshing
+    // if every upload failed (nothing new to show).
+    const hasCompleted = singleton.files.some((f) => f.state === "completed");
+    if (hasCompleted) {
+      const key = singleton.folderId ?? "__root__";
+      completionVersion[key] = (completionVersion[key] ?? 0) + 1;
+    }
+  }
+  prevAllDone = allDone;
+}
+
 function notify() {
+  updateCompletion();
   listeners.forEach((l) => l());
 }
 
@@ -100,6 +128,7 @@ export function cancelAllUploads(): void {
   singleton.files = [];
   singleton.snapshot = null;
   singleton.visible = false;
+  prevAllDone = false;
   notify();
 }
 
@@ -133,6 +162,7 @@ export function closePanel(): void {
     singleton.visible = false;
     singleton.files = [];
     singleton.snapshot = null;
+    prevAllDone = false;
     notify();
   }
 }
@@ -175,4 +205,32 @@ export function useUploadPanel(): UploadPanelSnapshot {
     isActive,
     allDone,
   };
+}
+
+// ── Upload completion hook ────────────────────────────────────────────────
+// Returns a version number that increments each time uploads complete
+// for the given folder.  The drive page watches this to trigger a
+// silent directory refresh without showing a loading spinner.
+
+export function useUploadCompletionVersion(folderId: string | null): number {
+  const [version, setVersion] = useState(() => completionVersion[folderId ?? "__root__"] ?? 0);
+
+  useEffect(() => {
+    const key = folderId ?? "__root__";
+    // Sync to the current value when folderId changes
+    setVersion(completionVersion[key] ?? 0);
+
+    const listener = () => {
+      setVersion((prev) => {
+        const current = completionVersion[key] ?? 0;
+        return prev !== current ? current : prev;
+      });
+    };
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }, [folderId]);
+
+  return version;
 }
