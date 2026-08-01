@@ -251,7 +251,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   );
 }
 
-// ── ErrorBanner ──────────────────────────────────────────────────────────────
+// ── ErrorBanner ───────────────────────────────────────────────────────────────
 
 export function ErrorBanner({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
@@ -263,6 +263,67 @@ export function ErrorBanner({ message, onDismiss }: { message: string; onDismiss
           <XCircle className="h-4 w-4" />
         </button>
       )}
+    </div>
+  );
+}
+
+// ── ConfirmDialog ────────────────────────────────────────────────────────────
+
+interface ConfirmDialogProps {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  loading?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  danger = false,
+  loading = false,
+  onConfirm,
+  onCancel,
+}: ConfirmDialogProps) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-[2px] animate-fade-in"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+      aria-describedby="confirm-dialog-desc"
+    >
+      <div className="animate-pop-in w-full max-w-sm">
+        <Card className="p-6">
+          <h2 id="confirm-dialog-title" className="text-base font-semibold text-slate-900 mb-2">
+            {title}
+          </h2>
+          <p id="confirm-dialog-desc" className="text-sm text-slate-500 mb-5">
+            {message}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={onCancel} disabled={loading}>
+              {cancelLabel}
+            </Button>
+            <Button
+              variant={danger ? "danger" : "primary"}
+              size="sm"
+              onClick={onConfirm}
+              loading={loading}
+            >
+              {confirmLabel}
+            </Button>
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }
