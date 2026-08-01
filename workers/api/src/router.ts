@@ -19,6 +19,7 @@ import {
   searchDrive,
   moveFile,
   collectSubtree,
+  getStorageInfo,
   HttpError,
 } from "./google";
 import { buildZip } from "./zip";
@@ -180,6 +181,13 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const parentId = (body.parentId as string | null) || (await getWorkspaceRootFolderId(env, workspace));
       const created = await ensureFolder(env, parentId, body.name.trim());
       return json({ folder: toClientFile(created) }, {}, origin);
+    }
+
+    // ------- STORAGE -------
+    if (path === "/storage" && request.method === "GET") {
+      await requireAuth(request, env);
+      const info = await getStorageInfo(env);
+      return json({ limit: info.limit, usage: info.usage, workspaceUsage: info.workspaceUsage }, {}, origin);
     }
 
     // ------- MUTATE: DELETE moves to Trash -------
