@@ -28,6 +28,7 @@ import type {
   TrashRestoreRequest,
   TrashRestoreResponse,
   TrashSearchResponse,
+  StorageResponse,
   Workspace,
 } from "@pagaska/shared";
 
@@ -204,6 +205,10 @@ export const api = {
   /** Search within trashed items. */
   async searchTrash(q: string): Promise<TrashSearchResponse> {
     return call<TrashSearchResponse>(`/trash/search?q=${encodeURIComponent(q)}`);
+  },
+  /** Get workspace storage usage. */
+  async getStorage(): Promise<StorageResponse> {
+    return call<StorageResponse>("/storage");
   },
 };
 
