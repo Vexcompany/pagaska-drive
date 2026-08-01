@@ -16,6 +16,7 @@ export interface AuthState {
   loading: boolean;
   login(workspace: Workspace, password: string): Promise<void>;
   logout(): void;
+  switchWorkspace(next: Workspace): void;
 }
 
 export const AuthContext = createContext<AuthState | null>(null);
