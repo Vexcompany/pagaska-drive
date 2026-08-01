@@ -3,7 +3,7 @@
 /**
  * Enhanced Properties dialog — shows detailed file/folder information
  * including name, type, size, dates, location, sharing status, etc.
- */
+ */ 
 
 import { useState } from "react";
 import {
