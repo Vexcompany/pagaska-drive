@@ -1,11 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
-import { api } from "@/lib/api";
-import { downloadItem } from "@/lib/download";
+import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
+import { downloadSelected } from "@/lib/download";
+import { formatSize, formatDate, typeLabel } from "@/lib/format";
+import { addFilesToPanel, useUploadCompletionVersion } from "@/hooks/useUploadPanel";
+import { setFolderCover, removeCoverByImage, getFolderCover, useFolderCoverVersion } from "@/stores/useFolderCoverStore";
+import { showToast } from "@/stores/useToastStore";
+import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
+import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
+import { PropertiesPanel } from "@/components/PropertiesPanel";
 import {
   Folder,
   FileText,
@@ -38,6 +45,10 @@ import {
   ChevronRight,
   Loader2,
   SlidersHorizontal,
+  Info,
+  ImagePlus,
+  CloudUpload,
+  Eye,
 } from "lucide-react";
 import {
   Button,
@@ -47,6 +58,8 @@ import {
   Skeleton,
   Modal,
   ErrorBanner,
+  Toast,
+  ContextMenu,
 } from "@/components/ui";
 import type {
   DriveFile,
@@ -63,6 +76,7 @@ type SortDir = "asc" | "desc";
 const VIEW_KEY = "pagaska.view";
 const SORT_KEY = "pagaska.sortKey";
 const SORT_DIR_KEY = "pagaska.sortDir";
+const SCROLL_KEY = "pagaska.scrollY";
 
 function readLocal<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -75,9 +89,25 @@ function readLocal<T>(key: string, fallback: T): T {
 }
 
 export default function DrivePage() {
+  return (
+    <Suspense fallback={
+      <main className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-brand-400" />
+      </main>
+    }>
+      <DriveInner />
+    </Suspense>
+  );
+}
+
+function DriveInner() {
   const { workspace, loading, logout } = useAuth();
   const router = useRouter();
-  const [folderId, setFolderId] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+
+  // Read folderId from URL – null means root
+  const folderId = useMemo(() => searchParams.get("folderId") ?? null, [searchParams]);
+
   const [data, setData] = useState<ListFilesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
@@ -110,6 +140,66 @@ export default function DrivePage() {
   const [moveCrumbs, setMoveCrumbs] = useState<{ id: string; name: string }[]>([]);
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // Properties panel
+  const [propsItem, setPropsItem] = useState<DriveFile | null>(null);
+
+  // Context menu
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: DriveFile } | null>(null);
+
+  // Upload drag state
+  const [dragOver, setDragOver] = useState(false);
+
+  // Re-render when folder cover store changes
+  useFolderCoverVersion();
+
+  // ── Undo toast for "Move to Trash" ──────────────────────────────────────
+  const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[]; restoring: boolean }>({
+    visible: false,
+    message: "",
+    undoIds: [],
+    restoring: false,
+  });
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showTrashToast(ids: string[], count: number) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ visible: true, message: `${count} item${count > 1 ? "s" : ""} moved to Trash`, undoIds: ids, restoring: false });
+    toastTimer.current = setTimeout(() => setToast((t) => ({ ...t, visible: false })), 6000);
+  }
+
+  async function undoTrash() {
+    const ids = toast.undoIds;
+    if (ids.length === 0 || toast.restoring) return;
+    setToast((t) => ({ ...t, restoring: true }));
+    try {
+      await api.restoreItems({ fileIds: ids });
+      setToast({ visible: false, message: "", undoIds: [], restoring: false });
+      showToast("Restored successfully");
+      void refresh(folderId);
+    } catch (err) {
+      setToast((t) => ({ ...t, restoring: false }));
+      showToast("Restore failed", { type: "error" });
+    }
+  }
+
+  // ── Helpers: URL-based navigation ───────────────────────────────────────
+
+  function navigateToFolder(id: string | null) {
+    router.push(id ? `/drive?folderId=${id}` : "/drive");
+  }
+
+  function openItem(item: DriveFile) {
+    if (item.mimeType === "application/vnd.google-apps.folder") {
+      navigateToFolder(item.id);
+    } else {
+      try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch { /* */ }
+      const folderParam = folderId ? `&folderId=${encodeURIComponent(folderId)}` : "";
+      router.push(`/preview?id=${encodeURIComponent(item.id)}${folderParam}`);
+    }
+  }
+
+  // ── Data fetching ───────────────────────────────────────────────────────
+
   const refresh = useCallback(async (id: string | null) => {
     setLoadingFiles(true);
     try {
@@ -122,6 +212,19 @@ export default function DrivePage() {
     }
   }, []);
 
+  // Silent refresh — used when uploads complete.  Re-fetches the file
+  // listing without showing a loading skeleton so the current scroll
+  // position and selection are preserved.
+  const silentRefresh = useCallback(async (id: string | null) => {
+    try {
+      const next = await api.listFiles(id);
+      setData(next);
+    } catch {
+      // Don't surface errors for background refresh — the current data
+      // is still valid and the user can always manually refresh.
+    }
+  }, []);
+
   useEffect(() => {
     if (!loading && !workspace) router.replace("/");
   }, [loading, workspace, router]);
@@ -129,6 +232,46 @@ export default function DrivePage() {
   useEffect(() => {
     if (workspace) void refresh(folderId);
   }, [workspace, folderId, refresh]);
+
+  // ── Auto-refresh when uploads complete ─────────────────────────────────
+  // Watches the completion version for the current folder.  When uploads
+  // finish, silently re-fetches the directory listing so new files appear
+  // without a full page reload.  Scroll position and selection are
+  // preserved because we don't show a loading skeleton.
+  const uploadCompletionVersion = useUploadCompletionVersion(folderId);
+  const prevUploadVersion = useRef(uploadCompletionVersion);
+  const prevUploadFolderId = useRef(folderId);
+
+  useEffect(() => {
+    // If the user navigated to a different folder, just sync the refs
+    // without triggering a refresh.
+    if (folderId !== prevUploadFolderId.current) {
+      prevUploadFolderId.current = folderId;
+      prevUploadVersion.current = uploadCompletionVersion;
+      return;
+    }
+
+    // Version increased ⇒ uploads completed for the current folder.
+    if (uploadCompletionVersion > 0 && uploadCompletionVersion > prevUploadVersion.current) {
+      prevUploadVersion.current = uploadCompletionVersion;
+      // Save scroll position, refresh, then restore.
+      const scrollY = window.scrollY;
+      void silentRefresh(folderId).then(() => {
+        window.scrollTo(0, scrollY);
+      });
+    }
+  }, [uploadCompletionVersion, folderId, silentRefresh]);
+
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SCROLL_KEY);
+      if (saved != null) {
+        sessionStorage.removeItem(SCROLL_KEY);
+        const y = Number(saved);
+        if (Number.isFinite(y)) window.scrollTo(0, y);
+      }
+    } catch { /* */ }
+  }, []);
 
   useEffect(() => {
     try {
@@ -170,12 +313,15 @@ export default function DrivePage() {
 
   const ordered = useMemo(() => [...folders, ...files], [folders, files]);
 
+  // ── Actions ─────────────────────────────────────────────────────────────
+
   async function createFolder() {
     if (!newFolderName.trim()) return;
     try {
       await api.createFolder({ name: newFolderName.trim(), parentId: folderId });
       setNewFolderName("");
       setShowNewFolder(false);
+      showToast("Folder created");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create folder.");
@@ -183,9 +329,9 @@ export default function DrivePage() {
   }
 
   async function deleteOne(id: string) {
-    if (!confirm("Delete this item? This cannot be undone.")) return;
     try {
       await api.deleteFile(id);
+      showTrashToast([id], 1);
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
@@ -195,24 +341,32 @@ export default function DrivePage() {
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} item${ids.length > 1 ? "s" : ""}? This cannot be undone.`)) return;
     try {
-      for (const id of ids) await api.deleteFile(id);
+      const result = await batchOperation(
+        ids,
+        async (chunk) => {
+          const res = await api.trashItems({ fileIds: chunk });
+          return { succeeded: res.trashed, failed: res.failed ?? [] };
+        },
+      );
       setSelected(new Set());
+      if (result.failed.length > 0) {
+        setError(`${result.failed.length} item(s) could not be moved to trash.`);
+      }
+      showTrashToast(result.succeeded, result.succeeded.length);
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
     }
   }
 
-  async function downloadSelected() {
-    for (const item of ordered) {
-      if (!selected.has(item.id)) continue;
-      try {
-        await downloadItem(item);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : `Failed to download ${item.name}.`);
-      }
+  async function handleDownloadSelected() {
+    const items = ordered.filter((i) => selected.has(i.id));
+    if (items.length === 0) return;
+    try {
+      await downloadSelected(items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Download failed.");
     }
   }
 
@@ -222,11 +376,48 @@ export default function DrivePage() {
       await api.rename({ fileId: renaming.id, name: renameValue.trim() });
       setRenaming(null);
       setRenameValue("");
+      showToast("Renamed successfully");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rename failed.");
     }
   }
+
+  // ── Upload handling ─────────────────────────────────────────────────────
+
+  function handleUploadFiles(fileList: FileList | File[]) {
+    const rawFiles = Array.from(fileList);
+    if (rawFiles.length === 0) return;
+    addFilesToPanel(rawFiles, folderId);
+  }
+
+  function onFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const list = e.target.files;
+    if (!list || list.length === 0) return;
+    handleUploadFiles(list);
+    e.target.value = "";
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const rawFiles: File[] = [];
+    const items = e.dataTransfer.items;
+    if (items && items.length && "webkitGetAsEntry" in items[0]) {
+      const entries: PagaskaFsEntry[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry?.() as PagaskaFsEntry | null;
+        if (entry) entries.push(entry);
+      }
+      collectEntries(entries, rawFiles).then(() => {
+        if (rawFiles.length > 0) addFilesToPanel(rawFiles, folderId);
+      });
+    } else {
+      handleUploadFiles(e.dataTransfer.files);
+    }
+  }
+
+  // ── Selection ───────────────────────────────────────────────────────────
 
   function toggleSelect(id: string) {
     setSelected((prev) => {
@@ -246,15 +437,18 @@ export default function DrivePage() {
     setSelected(new Set(ids.slice(lo, hi + 1)));
   }
 
-  function handleItemClick(e: React.MouseEvent, item: DriveFile, index: number) {
+  function handleRowClick(e: React.MouseEvent, item: DriveFile, index: number) {
     if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleSelect(item.id); return; }
     if (e.shiftKey && lastClicked.current) { e.preventDefault(); selectRange(lastClicked.current, item.id); return; }
-    if (item.mimeType === "application/vnd.google-apps.folder") {
-      setFolderId(item.id);
-    } else {
-      router.push(`/preview?id=${item.id}`);
-    }
+    toggleSelect(item.id);
   }
+
+  function handleContextMenu(e: React.MouseEvent, item: DriveFile) {
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY, item });
+  }
+
+  // ── Share ───────────────────────────────────────────────────────────────
 
   async function openShare(item: DriveFile) {
     setShareItem(item);
@@ -275,6 +469,7 @@ export default function DrivePage() {
     try {
       const { webViewLink } = await api.share(shareItem.id);
       setShareStatus({ public: true, role: "reader", webViewLink });
+      showToast("Share link created");
     } catch (err) {
       setShareStatus((prev: ShareStatusResponse | null) => ({ ...(prev ?? { public: false, role: null, webViewLink: null }), public: false }));
       setError(err instanceof Error ? err.message : "Share failed.");
@@ -288,24 +483,44 @@ export default function DrivePage() {
     try {
       await navigator.clipboard.writeText(shareStatus.webViewLink);
       setShareCopied(true);
+      showToast("Link copied");
       window.setTimeout(() => setShareCopied(false), 2000);
     } catch {
       window.prompt("Copy this link:", shareStatus.webViewLink);
     }
   }
 
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!shareItem && !renaming && !moveOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShareItem(null);
-        setRenaming(null);
-        setMoveOpen(false);
+      const target = e.target as HTMLElement;
+      const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      const isModal = Boolean(shareItem || renaming || moveOpen || propsItem);
+      if (isInput || isModal) {
+        if (e.key === "Escape" && isModal) {
+          e.preventDefault();
+          setShareItem(null);
+          setRenaming(null);
+          setMoveOpen(false);
+          setPropsItem(null);
+        }
+        return;
+      }
+      if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setSelected(new Set(ordered.map((i) => i.id)));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setSelected(new Set());
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        if (selected.size > 0) { e.preventDefault(); void deleteSelected(); }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [shareItem, renaming, moveOpen]);
+  }, [ordered, selected, shareItem, renaming, moveOpen, propsItem]);
+
+  // ── Move ────────────────────────────────────────────────────────────────
 
   function openMove() {
     setMoveTargets([...selected] as string[]);
@@ -330,6 +545,7 @@ export default function DrivePage() {
       await api.move({ fileIds: moveTargets, parentId: moveFolderId });
       setMoveOpen(false);
       setSelected(new Set());
+      showToast("Moved successfully");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Move failed.");
@@ -350,15 +566,48 @@ export default function DrivePage() {
     type: "File type",
   };
 
+  // Build context menu items
+  const ctxMenuItems = ctxMenu ? [
+    { label: "Open", icon: <Eye className="h-4 w-4" />, onClick: () => openItem(ctxMenu.item) },
+    { label: "Rename", icon: <Pencil className="h-4 w-4" />, onClick: () => { setRenaming(ctxMenu.item); setRenameValue(ctxMenu.item.name); } },
+    { label: "Share", icon: <LinkIcon className="h-4 w-4" />, onClick: () => void openShare(ctxMenu.item) },
+    { label: "Move", icon: <MoveRight className="h-4 w-4" />, onClick: () => { setMoveTargets([ctxMenu.item.id]); setMoveOpen(true); } },
+    { label: "Download", icon: <Download className="h-4 w-4" />, onClick: () => void downloadSelected([ctxMenu.item]) },
+    { label: "Properties", icon: <Info className="h-4 w-4" />, onClick: () => setPropsItem(ctxMenu.item) },
+    // Set as Folder Cover — only for images
+    ...(ctxMenu.item.mimeType.startsWith("image/") && ctxMenu.item.thumbnailLink && folderId ? [{
+      label: "Set as Folder Cover", icon: <ImagePlus className="h-4 w-4" />, onClick: () => {
+        setFolderCover(folderId, ctxMenu.item.id, ctxMenu.item.thumbnailLink!);
+        showToast("Folder cover updated");
+      }
+    }] : []),
+    { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteOne(ctxMenu.item.id), danger: true },
+  ] : [];
+
   return (
-    <main className="min-h-screen bg-slate-50">
+    <main
+      className="min-h-screen bg-slate-50"
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      {/* Upload drop overlay */}
+      {dragOver && (
+        <div className="fixed inset-0 z-50 bg-brand-500/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+          <div className="rounded-2xl bg-white p-8 shadow-2xl flex flex-col items-center gap-3 animate-pop-in">
+            <CloudUpload className="h-10 w-10 text-brand-500" />
+            <p className="text-lg font-semibold text-slate-900">Drop files to upload</p>
+            <p className="text-sm text-slate-400">Files will be uploaded to the current folder</p>
+          </div>
+        </div>
+      )}
+
       {/* Top nav */}
       <header className="sticky top-0 z-20 bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
-          {/* Logo + breadcrumb */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
-              onClick={() => { setFolderId(null); setQuery(""); }}
+              onClick={() => { navigateToFolder(null); setQuery(""); }}
               className="flex items-center gap-2 text-brand-600 hover:text-brand-700 font-semibold shrink-0"
             >
               <House className="h-4 w-4" />
@@ -368,7 +617,7 @@ export default function DrivePage() {
               <span key={c.id} className="flex items-center gap-1 min-w-0">
                 <ChevronRight className="h-3.5 w-3.5 text-slate-300 shrink-0" />
                 <button
-                  onClick={() => setFolderId(c.id)}
+                  onClick={() => navigateToFolder(c.id)}
                   className="text-sm text-slate-600 hover:text-slate-900 truncate max-w-[8rem]"
                 >
                   {c.name}
@@ -378,23 +627,30 @@ export default function DrivePage() {
             {searchQuery && (
               <span className="flex items-center gap-1">
                 <ChevronRight className="h-3.5 w-3.5 text-slate-300" />
-                <span className="text-sm text-slate-600 truncate">"{searchQuery}"</span>
+                <span className="text-sm text-slate-600 truncate">&quot;{searchQuery}&quot;</span>
               </span>
             )}
           </div>
 
-          {/* Workspace label */}
+          {/* Folder stats */}
+          {data && !searchQuery && (
+            <FolderStatsDisplay files={data.files} folders={data.folders} className="hidden lg:inline" />
+          )}
+
           <span className="hidden md:flex items-center gap-1.5 text-xs text-slate-500 shrink-0">
             <User className="h-3.5 w-3.5" />
             {workspace}
           </span>
 
-          {/* Nav actions */}
           <div className="flex items-center gap-1 shrink-0">
-            <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
-                <Upload className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Upload</span>
-              </Link>
+            <Link href="/trash" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
+              <Trash2 className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Trash</span>
+            </Link>
+            <Link href={folderId ? `/upload?folderId=${encodeURIComponent(folderId)}` : "/upload"} className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
+              <Upload className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Upload</span>
+            </Link>
             <Link href="/profile" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
               <User className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Workspace</span>
@@ -415,7 +671,6 @@ export default function DrivePage() {
 
         {/* Toolbar */}
         <div className="flex flex-col sm:flex-row gap-2">
-          {/* Search */}
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
             <input
@@ -439,9 +694,7 @@ export default function DrivePage() {
             )}
           </div>
 
-          {/* Right controls */}
           <div className="flex gap-2 items-center">
-            {/* Sort dropdown */}
             <div className="relative">
               <button
                 onClick={() => setShowSortMenu((v) => !v)}
@@ -479,7 +732,6 @@ export default function DrivePage() {
               )}
             </div>
 
-            {/* View toggle */}
             <div className="flex rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
               <button
                 onClick={() => setView("list")}
@@ -497,7 +749,6 @@ export default function DrivePage() {
               </button>
             </div>
 
-            {/* New folder */}
             <button
               onClick={() => setShowNewFolder((v) => !v)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm hover:bg-slate-50 transition-all"
@@ -542,7 +793,7 @@ export default function DrivePage() {
               <Trash2 className="h-3.5 w-3.5" />
               Delete
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => void downloadSelected()}>
+            <Button variant="ghost" size="sm" onClick={() => void handleDownloadSelected()}>
               <Download className="h-3.5 w-3.5" />
               Download
             </Button>
@@ -576,6 +827,7 @@ export default function DrivePage() {
               query={searchQuery}
               atRoot={folderId === null}
               onClear={() => setQuery("")}
+              onUpload={() => document.getElementById("drive-upload-input")?.click()}
             />
           )}
 
@@ -612,7 +864,8 @@ export default function DrivePage() {
                     return (
                       <tr
                         key={item.id}
-                        onClick={(e) => handleItemClick(e, item, i)}
+                        onClick={(e) => handleRowClick(e, item, i)}
+                        onContextMenu={(e) => handleContextMenu(e, item)}
                         className={`group border-b border-slate-50 last:border-0 cursor-pointer select-none transition-colors duration-100 ${
                           isSel ? "bg-brand-50 hover:bg-brand-100/70" : "hover:bg-slate-50"
                         }`}
@@ -631,7 +884,14 @@ export default function DrivePage() {
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <FileIcon mime={item.mimeType} className="h-4 w-4 shrink-0 text-slate-400" isFolder={isFolder} />
-                            <span className="truncate font-medium text-slate-800">{item.name}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                              className="truncate font-medium text-slate-800 hover:text-brand-600 hover:underline text-left"
+                              title={item.name}
+                            >
+                              {item.name}
+                            </button>
                             {isSearching && (item as DriveFile & { path?: string | null }).path && (
                               <span className="text-xs text-slate-400 truncate shrink-0">· {(item as DriveFile & { path?: string | null }).path}</span>
                             )}
@@ -679,10 +939,13 @@ export default function DrivePage() {
               {ordered.map((item, i) => {
                 const isFolder = item.mimeType === "application/vnd.google-apps.folder";
                 const isSel = selected.has(item.id);
+                // Folder cover image
+                const coverUrl = isFolder ? getFolderCoverUrl(item.id) : null;
                 return (
                   <div
                     key={item.id}
-                    onClick={(e) => handleItemClick(e, item, i)}
+                    onClick={(e) => handleRowClick(e, item, i)}
+                    onContextMenu={(e) => handleContextMenu(e, item)}
                     className={`group relative flex flex-col items-center rounded-2xl border p-3 cursor-pointer select-none transition-all duration-150 ${
                       isSel
                         ? "border-brand-300 ring-2 ring-brand-200 bg-brand-50 shadow-sm"
@@ -698,7 +961,12 @@ export default function DrivePage() {
                       onChange={() => toggleSelect(item.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
-                    <div className="h-16 w-16 flex items-center justify-center mb-2">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                      className="h-16 w-16 flex items-center justify-center mb-2 focus:outline-none overflow-hidden"
+                      title={item.name}
+                    >
                       {!isFolder && item.thumbnailLink && item.mimeType.startsWith("image/") ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
@@ -707,13 +975,26 @@ export default function DrivePage() {
                           className="h-full w-full object-cover rounded-xl shadow-sm"
                           loading="lazy"
                         />
+                      ) : isFolder && coverUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={coverUrl}
+                          alt=""
+                          className="h-full w-full object-cover rounded-xl shadow-sm"
+                          loading="lazy"
+                        />
                       ) : (
                         <FileIconLarge mime={item.mimeType} isFolder={isFolder} />
                       )}
-                    </div>
-                    <div className="text-xs font-medium truncate w-full text-center text-slate-800 leading-tight" title={item.name}>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); openItem(item); }}
+                      className="text-xs font-medium truncate w-full text-center text-slate-800 hover:text-brand-600 hover:underline leading-tight"
+                      title={item.name}
+                    >
                       {item.name}
-                    </div>
+                    </button>
                     <div className="text-xs text-slate-400 mt-0.5">
                       {isFolder ? "Folder" : formatSize(item.size)}
                     </div>
@@ -724,6 +1005,9 @@ export default function DrivePage() {
           )}
         </Card>
       </div>
+
+      {/* Hidden upload input */}
+      <input id="drive-upload-input" type="file" multiple className="hidden" onChange={onFileInput} />
 
       {/* Rename modal */}
       <Modal open={Boolean(renaming)} onClose={() => setRenaming(null)} className="max-w-sm">
@@ -771,12 +1055,7 @@ export default function DrivePage() {
                   </Badge>
                 </div>
                 {!shareStatus.public ? (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => void makePublic()}
-                    loading={shareBusy}
-                  >
+                  <Button variant="primary" size="sm" onClick={() => void makePublic()} loading={shareBusy}>
                     <LinkIcon className="h-3.5 w-3.5" />
                     Enable link sharing
                   </Button>
@@ -785,12 +1064,7 @@ export default function DrivePage() {
                     <div className="text-xs text-slate-500">
                       Role: <span className="font-medium text-slate-700">{shareStatus.role === "reader" ? "Viewer" : shareStatus.role ?? "Viewer"}</span>
                     </div>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => void copyShareLink()}
-                      disabled={!shareStatus.webViewLink}
-                    >
+                    <Button variant="primary" size="sm" onClick={() => void copyShareLink()} disabled={!shareStatus.webViewLink}>
                       {shareCopied ? (
                         <><Check className="h-3.5 w-3.5" /> Copied</>
                       ) : (
@@ -818,7 +1092,6 @@ export default function DrivePage() {
           <p className="text-sm text-slate-500 mb-4">
             Moving {moveTargets.length} item{moveTargets.length > 1 ? "s" : ""} — select a destination
           </p>
-
           <nav className="flex items-center gap-1 text-sm mb-3 flex-wrap" aria-label="Move destination">
             <button
               onClick={() => { setMoveFolderId(null); setMoveCrumbs([]); }}
@@ -839,7 +1112,6 @@ export default function DrivePage() {
               </span>
             ))}
           </nav>
-
           <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-200">
             {moveFolders.length === 0 && (
               <div className="flex flex-col items-center justify-center py-8 gap-2 text-slate-400">
@@ -860,7 +1132,6 @@ export default function DrivePage() {
               </button>
             ))}
           </div>
-
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="ghost" onClick={() => setMoveOpen(false)}>Cancel</Button>
             <Button variant="primary" onClick={() => void confirmMove()} loading={moveBusy}>
@@ -870,10 +1141,39 @@ export default function DrivePage() {
         </Card>
       </Modal>
 
+      {/* Properties panel */}
+      {propsItem && data && (
+        <PropertiesPanel
+          item={propsItem}
+          breadcrumb={data.breadcrumb}
+          workspace={workspace}
+          folderId={folderId}
+          onClose={() => setPropsItem(null)}
+        />
+      )}
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxMenuItems}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+
       {/* Close sort menu on outside click */}
       {showSortMenu && (
         <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />
       )}
+
+      {/* Undo toast for "Move to Trash" */}
+      <Toast
+        visible={toast.visible}
+        message={toast.restoring ? "Restoring…" : toast.message}
+        action={toast.restoring ? undefined : { label: "UNDO", onClick: undoTrash }}
+        onDismiss={() => { if (!toast.restoring) setToast((t) => ({ ...t, visible: false })); }}
+      />
     </main>
   );
 }
@@ -933,27 +1233,6 @@ function compareItems(a: DriveFile, b: DriveFile, key: SortKey, dir: SortDir): n
   return dir === "asc" ? r : -r;
 }
 
-function typeLabel(mime: string): string {
-  return mime.split("/").pop() ?? mime;
-}
-
-function formatSize(bytes: string | number | null): string {
-  if (bytes == null) return "—";
-  const n = typeof bytes === "string" ? Number(bytes) : bytes;
-  if (!Number.isFinite(n)) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
 function SkeletonList({ view }: { view: ViewMode }) {
   if (view === "grid") {
     return (
@@ -983,7 +1262,7 @@ function SkeletonList({ view }: { view: ViewMode }) {
   );
 }
 
-function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean; query: string; atRoot: boolean; onClear: () => void }) {
+function EmptyState({ searching, query, atRoot, onClear, onUpload }: { searching: boolean; query: string; atRoot: boolean; onClear: () => void; onUpload: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 px-6 text-center">
       {searching ? (
@@ -991,7 +1270,7 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           <div className="rounded-2xl bg-slate-100 p-5 mb-4">
             <Search className="h-8 w-8 text-slate-400" />
           </div>
-          <p className="font-semibold text-slate-700">No results for "{query}"</p>
+          <p className="font-semibold text-slate-700">No results for &quot;{query}&quot;</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Try a different name or check the spelling.</p>
           <Button variant="ghost" size="sm" onClick={onClear}>
             <X className="h-4 w-4" /> Clear search
@@ -1004,9 +1283,12 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           </div>
           <p className="font-semibold text-slate-700">No files yet</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Upload files or create a folder to get started.</p>
-          <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-xl px-4 py-2 text-sm font-medium transition-all shadow-sm">
+          <button
+            onClick={onUpload}
+            className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-xl px-4 py-2 text-sm font-medium transition-all shadow-sm"
+          >
             <Upload className="h-4 w-4" /> Upload files
-          </Link>
+          </button>
         </>
       ) : (
         <>
@@ -1015,12 +1297,60 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           </div>
           <p className="font-semibold text-slate-700">This folder is empty</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Upload files or create a subfolder.</p>
-          <Link href="/upload" className="inline-flex items-center gap-1.5 text-slate-700 hover:bg-slate-100 rounded-xl px-4 py-2 text-sm font-medium transition-all border border-slate-200">
+          <button
+            onClick={onUpload}
+            className="inline-flex items-center gap-1.5 text-slate-700 hover:bg-slate-100 rounded-xl px-4 py-2 text-sm font-medium transition-all border border-slate-200"
+          >
             <Upload className="h-4 w-4" /> Upload files
-          </Link>
+          </button>
         </>
       )}
     </div>
   );
 }
 
+// ── File system entry helpers for drag & drop ────────────────────────────────
+
+interface PagaskaFsEntry {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  fullPath: string;
+  createReader(): { readEntries(cb: (entries: PagaskaFsEntry[]) => void): void };
+  file(cb: (f: File) => void): void;
+}
+
+function collectEntries(entries: PagaskaFsEntry[], out: File[]): Promise<void> {
+  return Promise.all(
+    entries.map(
+      (entry) =>
+        new Promise<void>((resolve) => {
+          if (entry.isFile) {
+            entry.file((f) => {
+              try {
+                Object.defineProperty(f, "webkitRelativePath", { value: entry.fullPath.replace(/^\//, "") });
+              } catch { /* readonly on some engines */ }
+              out.push(f);
+              resolve();
+            });
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const all: PagaskaFsEntry[] = [];
+            const read = () => {
+              reader.readEntries((batch) => {
+                if (batch.length === 0) {
+                  collectEntries(all, out).then(resolve);
+                } else {
+                  all.push(...batch);
+                  read();
+                }
+              });
+            };
+            read();
+          } else {
+            resolve();
+          }
+        })
+    )
+  ).then(() => undefined);
+}

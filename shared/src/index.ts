@@ -45,6 +45,8 @@ export interface DriveFile {
   thumbnailLink: string | null;
   webViewLink: string | null;
   modifiedTime: string | null;
+  /** Whether the item is in the trash. */
+  trashed: boolean;
 }
 
 export interface DriveFolder extends DriveFile {
@@ -57,6 +59,18 @@ export interface ListFilesResponse {
   folders: DriveFolder[];
   /** Resolved path segments for breadcrumb rendering. */
   breadcrumb: { id: string; name: string }[];
+  /** Statistics for the current folder (file count, folder count, total size). */
+  stats?: FolderStats;
+}
+
+/** Statistics for a folder's direct children. */
+export interface FolderStats {
+  /** Number of files (non-folder items) in the folder. */
+  fileCount: number;
+  /** Number of sub-folders in the folder. */
+  folderCount: number;
+  /** Total size of all files in the folder (bytes). */
+  totalSize: number;
 }
 
 export interface StartUploadRequest {
@@ -115,6 +129,8 @@ export interface PreviewResponse {
    *  to Google directly; the Worker streams the bytes with CORS headers. */
   contentUrl: string | null;
   webViewLink: string | null;
+  /** Whether the item is currently in the trash. */
+  trashed: boolean;
 }
 
 export interface ShareRequest {
@@ -156,6 +172,8 @@ export interface MoveRequest {
 export interface MoveResponse {
   ok: boolean;
   moved: number;
+  /** IDs that could not be moved (partial failure). */
+  failed: string[];
 }
 
 export interface LoginRequest {
@@ -163,6 +181,59 @@ export interface LoginRequest {
   workspace: Workspace;
   /** Workspace password, validated server-side against a runtime secret. */
   password: string;
+}
+
+// ── Trash ──────────────────────────────────────────────────────────────────
+
+export interface TrashRequest {
+  /** File or folder ids to move to trash. */
+  fileIds: string[];
+}
+
+export interface TrashResponse {
+  ok: boolean;
+  trashed: number;
+  /** IDs that could not be trashed (partial failure). */
+  failed: string[];
+}
+
+export interface TrashRestoreRequest {
+  /** File or folder ids to restore from trash. */
+  fileIds: string[];
+}
+
+export interface TrashRestoreResponse {
+  ok: boolean;
+  restored: number;
+  /** IDs that could not be restored (partial failure). */
+  failed: string[];
+}
+
+export interface TrashDeleteForeverRequest {
+  /** File or folder ids to permanently delete. */
+  fileIds: string[];
+}
+
+export interface TrashDeleteForeverResponse {
+  ok: boolean;
+  deleted: number;
+  /** IDs that could not be permanently deleted (partial failure). */
+  failed: string[];
+}
+
+export interface TrashListResponse {
+  files: DriveFile[];
+  folders: DriveFolder[];
+  /** Breadcrumb when navigating inside a trashed folder. */
+  breadcrumb: { id: string; name: string }[];
+  /** True when there are more trashed items than could be safely listed
+   *  within the Cloudflare Worker subrequest limit. */
+  hasMore?: boolean;
+}
+
+export interface TrashSearchResponse {
+  files: SearchItem[];
+  folders: SearchItem[];
 }
 
 /**
@@ -192,4 +263,5 @@ export type ApiErrorCode =
   | "INTERNAL_ERROR"
   | "NOT_FOUND"
   | "MISSING_CONFIG"
-  | "CONFIG_ERROR";
+  | "CONFIG_ERROR"
+  | "ITEM_IN_TRASH";

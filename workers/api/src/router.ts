@@ -5,6 +5,10 @@ import {
   getFile,
   getBreadcrumb,
   deleteFile,
+  trashFile,
+  restoreFile,
+  listTrashed,
+  searchTrashed,
   renameFile,
   startResumableUpload,
   forwardChunk,
@@ -20,6 +24,17 @@ import {
 import { buildZip } from "./zip";
 import { isWorkspace, WORKSPACES, type Workspace, type ApiErrorCode } from "@pagaska/shared";
 
+/**
+ * Maximum number of items the backend will process in a single
+ * batch request.  Cloudflare Workers allow at most 50 subrequests
+ * per invocation on the free plan.  Each batch item costs 2-3
+ * subrequests (getFile + workspace check + operation), so 20
+ * items keeps us safely under the limit even with shared-cached
+ * parent walks.  The frontend splits larger batches into chunks
+ * of this size and sends them sequentially.
+ */
+const MAX_BATCH = 20;
+
 const CORS_HEADERS = (origin: string) => ({
   "Access-Control-Allow-Origin": origin,
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
@@ -29,53 +44,32 @@ const CORS_HEADERS = (origin: string) => ({
 
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 
-/**
- * Map internal error codes to the public machine-readable code that
- * the frontend branches on. Stable across releases.
- */
 function codeFor(err: HttpError): ApiErrorCode {
   switch (err.code) {
-    case "INVALID_LOGIN_PAYLOAD":
-      return "INVALID_LOGIN_PAYLOAD";
-    case "INVALID_CREDENTIALS":
-      return "INVALID_CREDENTIALS";
-    case "UNAUTHENTICATED":
-      return "UNAUTHENTICATED";
-    case "FORBIDDEN":
-      return "FORBIDDEN";
-    case "INVALID_PAYLOAD":
-      return "INVALID_PAYLOAD";
-    case "MISSING_QUERY_PARAM":
-      return "MISSING_QUERY_PARAM";
-    case "DRIVE_ERROR":
-      return "DRIVE_ERROR";
-    case "MISSING_CONFIG":
-      return "MISSING_CONFIG";
-    case "CONFIG_ERROR":
-      return "CONFIG_ERROR";
+    case "INVALID_LOGIN_PAYLOAD": return "INVALID_LOGIN_PAYLOAD";
+    case "INVALID_CREDENTIALS": return "INVALID_CREDENTIALS";
+    case "UNAUTHENTICATED": return "UNAUTHENTICATED";
+    case "FORBIDDEN": return "FORBIDDEN";
+    case "INVALID_PAYLOAD": return "INVALID_PAYLOAD";
+    case "MISSING_QUERY_PARAM": return "MISSING_QUERY_PARAM";
+    case "DRIVE_ERROR": return "DRIVE_ERROR";
+    case "MISSING_CONFIG": return "MISSING_CONFIG";
+    case "CONFIG_ERROR": return "CONFIG_ERROR";
+    case "ITEM_IN_TRASH": return "ITEM_IN_TRASH";
     case "INTERNAL_ERROR":
-    default:
-      return "INTERNAL_ERROR";
+    default: return "INTERNAL_ERROR";
   }
 }
 
 function json(data: unknown, init: ResponseInit = {}, origin = "*"): Response {
   return new Response(JSON.stringify(data), {
     ...init,
-    headers: {
-      ...JSON_HEADERS,
-      ...CORS_HEADERS(origin),
-      ...(init.headers ?? {}),
-    },
+    headers: { ...JSON_HEADERS, ...CORS_HEADERS(origin), ...(init.headers ?? {}) },
   });
 }
 
 function err(code: ApiErrorCode, message: string, status: number, origin = "*"): Response {
-  return json(
-    { success: false, code, message, status },
-    { status },
-    origin
-  );
+  return json({ success: false, code, message, status }, { status }, origin);
 }
 
 function throwHttp(status: number, code: HttpError["code"], message: string): never {
@@ -91,28 +85,43 @@ async function requireAuth(request: Request, env: Env): Promise<Workspace> {
   return payload.workspace;
 }
 
-/**
- * Look up the per-workspace password from Cloudflare runtime secrets.
- * The values are NEVER sent to the browser; only the equality check
- * happens server-side.
- */
 function lookupWorkspacePassword(env: Env, workspace: Workspace): string | null {
   switch (workspace) {
-    case "pagaska":
-      return env.PAGASKA_PASSWORD || null;
-    case "osama":
-      return env.OSAMA_PASSWORD || null;
-    case "pmr":
-      return env.PMR_PASSWORD || null;
+    case "pagaska": return env.PAGASKA_PASSWORD || null;
+    case "osama": return env.OSAMA_PASSWORD || null;
+    case "pmr": return env.PMR_PASSWORD || null;
   }
 }
 
 async function getWorkspaceRootFolderId(env: Env, workspace: Workspace): Promise<string> {
   const rootId = env.GOOGLE_DRIVE_ROOT;
   if (!rootId) throwHttp(500, "MISSING_CONFIG", "GOOGLE_DRIVE_ROOT is not configured.");
-  // Pre-create the per-workspace folder if missing.
   const folder = await ensureFolder(env, rootId, workspace);
   return folder.id;
+}
+
+function toClientFile(f: { id: string; name: string; mimeType: string; size: string | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; trashed: boolean }) {
+  return {
+    id: f.id, name: f.name, mimeType: f.mimeType,
+    size: f.size ? Number(f.size) : null,
+    parents: f.parents, thumbnailLink: f.thumbnailLink,
+    webViewLink: f.webViewLink, modifiedTime: f.modifiedTime,
+    trashed: f.trashed,
+  };
+}
+
+/** Validate that fileIds is a non-empty array of strings within MAX_BATCH. */
+function validateBatchIds(body: unknown): string[] {
+  if (!body || !Array.isArray((body as { fileIds?: unknown }).fileIds) ||
+      ((body as { fileIds: unknown[] }).fileIds).length === 0 ||
+      !((body as { fileIds: unknown[] }).fileIds).every((id) => typeof id === "string")) {
+    throwHttp(400, "INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.");
+  }
+  const ids = (body as { fileIds: string[] }).fileIds;
+  if (ids.length > MAX_BATCH) {
+    throwHttp(400, "INVALID_PAYLOAD", `Batch too large: ${ids.length} items. Maximum is ${MAX_BATCH} per request. Split into smaller batches on the client.`);
+  }
+  return ids;
 }
 
 export async function handle(request: Request, env: Env): Promise<Response> {
@@ -127,46 +136,20 @@ export async function handle(request: Request, env: Env): Promise<Response> {
   try {
     // ------- AUTH -------
     if (path === "/auth/login" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as
-        | { workspace?: unknown; password?: unknown }
-        | null;
+      const body = (await request.json().catch(() => null)) as { workspace?: unknown; password?: unknown } | null;
       if (!body || !isWorkspace(body.workspace) || typeof body.password !== "string" || body.password.length === 0) {
         return err("INVALID_LOGIN_PAYLOAD", "Provide a workspace and a non-empty password.", 400, origin);
       }
       const workspace = body.workspace;
       const expected = lookupWorkspacePassword(env, workspace);
-      if (!expected) {
-        // Misconfiguration: a workspace secret is missing. Surface a
-        // config error rather than a generic auth failure so the
-        // operator can fix it.
-        return err("CONFIG_ERROR", `No password configured for workspace "${workspace}".`, 500, origin);
-      }
-      // Constant-time comparison to avoid leaking length-based timing
-      // information. Both strings are short (operator-supplied
-      // passwords) but using `timingSafeEqual` keeps the audit story
-      // clean.
+      if (!expected) return err("CONFIG_ERROR", `No password configured for workspace "${workspace}".`, 500, origin);
       const ok = await constantTimeEqual(body.password, expected);
       if (!ok) return err("INVALID_CREDENTIALS", "Wrong password for the selected workspace.", 401, origin);
-      const token = await signJwt(
-        { sub: workspace, workspace },
-        60 * 60 * 24 * 7,
-        env.JWT_SECRET
-      );
-      return json(
-        {
-          token,
-          workspace,
-          issuedAt: Math.floor(Date.now() / 1000),
-          expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
-        },
-        {},
-        origin
-      );
+      const token = await signJwt({ sub: workspace, workspace }, 60 * 60 * 24 * 7, env.JWT_SECRET);
+      return json({ token, workspace, issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, {}, origin);
     }
 
     if (path === "/auth/workspaces" && request.method === "GET") {
-      // Public list of available workspaces. Used by the login UI
-      // before authentication. Does NOT leak passwords.
       return json({ workspaces: [...WORKSPACES] }, {}, origin);
     }
 
@@ -185,7 +168,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const files = items.filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
       const folder = folderParam ? await getFile(env, folderId) : null;
       const breadcrumb = await getBreadcrumb(env, folderId, env.GOOGLE_DRIVE_ROOT);
-      return json({ folder, files, folders, breadcrumb }, {}, origin);
+      return json({ folder: folder ? toClientFile(folder) : null, files: files.map(toClientFile), folders: folders.map(toClientFile), breadcrumb }, {}, origin);
     }
 
     if (path === "/folders" && request.method === "POST") {
@@ -196,15 +179,19 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       }
       const parentId = (body.parentId as string | null) || (await getWorkspaceRootFolderId(env, workspace));
       const created = await ensureFolder(env, parentId, body.name.trim());
-      return json({ folder: created }, {}, origin);
+      return json({ folder: toClientFile(created) }, {}, origin);
     }
 
-    // ------- MUTATE -------
+    // ------- MUTATE: DELETE moves to Trash -------
     const deleteMatch = /^\/files\/([^/]+)$/.exec(path);
     if (deleteMatch && request.method === "DELETE") {
-      await requireAuth(request, env);
+      const workspace = await requireAuth(request, env);
       const fileId = deleteMatch[1];
-      await deleteFile(env, fileId);
+      const file = await getFile(env, fileId);
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
+        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      }
+      await trashFile(env, fileId);
       return json({ ok: true }, {}, origin);
     }
 
@@ -215,7 +202,112 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         return err("INVALID_PAYLOAD", "Both fileId and name are required.", 400, origin);
       }
       const file = await renameFile(env, body.fileId, body.name);
-      return json({ file }, {}, origin);
+      return json({ file: toClientFile(file) }, {}, origin);
+    }
+
+    // ------- TRASH -------
+    // GET /trash — list all trashed items in the workspace
+    if (path === "/trash" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const rootFolderId = await getWorkspaceRootFolderId(env, workspace);
+      const allTrashed = await listTrashed(env);
+      // Filter to items within the workspace root using a shared cache.
+      // Cap at a safe limit to stay under the Cloudflare subrequest ceiling.
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
+      const scoped: typeof allTrashed = [];
+      const limit = Math.min(allTrashed.length, MAX_BATCH * 2);
+      for (let i = 0; i < limit; i++) {
+        const item = allTrashed[i];
+        const inside = await isInsideRoot(item, env.GOOGLE_DRIVE_ROOT, workspace, env, cache);
+        if (inside) scoped.push(item);
+      }
+      const folders = scoped.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
+      const files = scoped.filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
+      return json({ files: files.map(toClientFile), folders: folders.map(toClientFile), breadcrumb: [], hasMore: allTrashed.length > limit }, {}, origin);
+    }
+
+    // POST /trash — move items to trash (batch, max MAX_BATCH)
+    if (path === "/trash" && request.method === "POST") {
+      const workspace = await requireAuth(request, env);
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
+      let trashed = 0;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env, cache)) { failed.push(fileId); continue; }
+          await trashFile(env, fileId);
+          trashed += 1;
+        } catch { failed.push(fileId); }
+      }
+      return json({ ok: true, trashed, failed }, {}, origin);
+    }
+
+    // POST /trash/restore — restore items from trash (batch, max MAX_BATCH)
+    // For trashed items, skip the expensive isInsideRoot walk and just
+    // verify the file is actually trashed.  Items were scoped to the
+    // workspace when they were listed via GET /trash.
+    if (path === "/trash/restore" && request.method === "POST") {
+      const workspace = await requireAuth(request, env);
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
+      let restored = 0;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!file.trashed) { failed.push(fileId); continue; }
+          await restoreFile(env, fileId);
+          restored += 1;
+        } catch { failed.push(fileId); }
+      }
+      return json({ ok: true, restored, failed }, {}, origin);
+    }
+
+    // DELETE /trash — permanently delete items (batch, max MAX_BATCH)
+    // For trashed items, skip the expensive isInsideRoot walk and just
+    // verify the file is actually trashed.  This keeps each item at 2
+    // subrequests (getFile + deleteFile) instead of 4-7.
+    if (path === "/trash" && request.method === "DELETE") {
+      const workspace = await requireAuth(request, env);
+      const body = (await request.json().catch(() => null));
+      const fileIds = validateBatchIds(body);
+      let deleted = 0;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!file.trashed) { failed.push(fileId); continue; }
+          await deleteFile(env, fileId);
+          deleted += 1;
+        } catch { failed.push(fileId); }
+      }
+      return json({ ok: true, deleted, failed }, {}, origin);
+    }
+
+    // GET /trash/search — search within trashed items
+    if (path === "/trash/search" && request.method === "GET") {
+      const workspace = await requireAuth(request, env);
+      const query = (url.searchParams.get("q") ?? "").trim();
+      if (!query) return json({ files: [], folders: [] }, {}, origin);
+      const results = await searchTrashed(env, query);
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
+      const files: { id: string; name: string; mimeType: string; size: number | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; trashed: boolean; path: string | null }[] = [];
+      const folders: typeof files = [];
+      const limit = Math.min(results.length, MAX_BATCH * 2);
+      for (let i = 0; i < limit; i++) {
+        const item = results[i];
+        const inside = await isInsideRoot(item, env.GOOGLE_DRIVE_ROOT, workspace, env, cache);
+        if (!inside) continue;
+        const resolvedPath = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
+        if (resolvedPath === undefined) continue;
+        const entry = { ...toClientFile(item), path: resolvedPath === null ? null : resolvedPath };
+        if (item.mimeType === "application/vnd.google-apps.folder") folders.push(entry);
+        else files.push(entry);
+      }
+      return json({ files, folders }, {}, origin);
     }
 
     // ------- UPLOAD HELPERS -------
@@ -226,12 +318,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         return err("INVALID_PAYLOAD", "filename, mimeType and size are required.", 400, origin);
       }
       const parentId = (body.parentId as string | null) || (await getWorkspaceRootFolderId(env, workspace));
-      const result = await startResumableUpload(env, {
-        filename: body.filename,
-        mimeType: body.mimeType,
-        size: body.size,
-        parentId,
-      });
+      const result = await startResumableUpload(env, { filename: body.filename, mimeType: body.mimeType, size: body.size, parentId });
       return json(result, {}, origin);
     }
 
@@ -252,21 +339,16 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     }
 
     if (path === "/upload/finish" && request.method === "POST") {
-      // Convenience: when the engine finishes via the resumable session
-      // directly, we don't strictly need this. But we expose it so the
-      // UI can do a final read-back to confirm the file exists.
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null)) as { fileId?: unknown } | null;
       if (!body || typeof body.fileId !== "string") {
         return err("INVALID_PAYLOAD", "fileId is required.", 400, origin);
       }
-      // Just confirm the file is visible to the user.
       const file = await getFile(env, body.fileId);
-      // Ensure the file is actually inside the workspace's root subtree.
       if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
         return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
       }
-      return json({ ok: true, file }, {}, origin);
+      return json({ ok: true, file: toClientFile(file) }, {}, origin);
     }
 
     // ------- PREVIEW -------
@@ -275,31 +357,10 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      // Defensive: `thumbnailLink` is typed as `string | null` but Google
-      // can omit it entirely (in which case the JSON deserializes to
-      // `undefined`). Guard against both before calling `.replace`.
-      const thumbnailUrl =
-        file.thumbnailLink && typeof file.thumbnailLink === "string"
-          ? file.thumbnailLink.replace(/=s\d+/, "=s1024")
-          : null;
-      // Content is proxied through the Worker (`/media`) so the browser
-      // never needs a Google token or signed URL; the Worker streams the
-      // bytes with CORS headers and honors Range requests.
+      const thumbnailUrl = file.thumbnailLink && typeof file.thumbnailLink === "string" ? file.thumbnailLink.replace(/=s\d+/, "=s1024") : null;
       const baseOrigin = new URL(request.url).origin;
       const contentUrl = `${baseOrigin}/media?id=${encodeURIComponent(fileId)}`;
-      return json(
-        {
-          id: file.id,
-          name: file.name,
-          mimeType: file.mimeType,
-          size: file.size ? Number(file.size) : null,
-          thumbnailUrl,
-          contentUrl,
-          webViewLink: file.webViewLink,
-        },
-        {},
-        origin
-      );
+      return json({ id: file.id, name: file.name, mimeType: file.mimeType, size: file.size ? Number(file.size) : null, thumbnailUrl, contentUrl, webViewLink: file.webViewLink, trashed: file.trashed }, {}, origin);
     }
 
     // ------- MEDIA (proxied file content) -------
@@ -312,9 +373,6 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       const media = await fetchMedia(env, fileId, range);
       const headers = new Headers(CORS_HEADERS(origin));
       headers.set("Content-Type", file.mimeType);
-      // Pass through the headers that make media streaming work:
-      // Content-Range / Accept-Ranges / Content-Length come from Google's
-      // 200 or 206 response and must match the body actually streamed.
       for (const name of ["content-range", "accept-ranges", "content-length", "etag", "last-modified"]) {
         const value = media.headers.get(name);
         if (value) headers.set(name, value);
@@ -322,56 +380,36 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       return new Response(media.body, { status: media.status, headers });
     }
 
-    // ------- SEARCH (recursive, partial, case-insensitive) -------
+    // ------- SEARCH (recursive, excludes trash) -------
     if (path === "/search" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const query = (url.searchParams.get("q") ?? "").trim();
       if (!query) return json({ files: [], folders: [] }, {}, origin);
       const results = await searchDrive(env, query);
-      // Scope to this workspace's root and resolve each result's path.
       const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
-      const files: { id: string; name: string; mimeType: string; size: string | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; path: string | null }[] = [];
+      const files: { id: string; name: string; mimeType: string; size: number | null; parents: string[]; thumbnailLink: string | null; webViewLink: string | null; modifiedTime: string | null; trashed: boolean; path: string | null }[] = [];
       const folders: typeof files = [];
       for (const item of results) {
-        const path = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
-        if (path === undefined) continue; // outside the workspace root
-        const entry = {
-          id: item.id,
-          name: item.name,
-          mimeType: item.mimeType,
-          size: item.size,
-          parents: item.parents,
-          thumbnailLink: item.thumbnailLink,
-          webViewLink: item.webViewLink,
-          modifiedTime: item.modifiedTime,
-          path: path === null ? null : path,
-        };
+        const pathStr = await scopedSearchPath(env, item, env.GOOGLE_DRIVE_ROOT, workspace, cache);
+        if (pathStr === undefined) continue;
+        const entry = { ...toClientFile(item), path: pathStr === null ? null : pathStr };
         if (item.mimeType === "application/vnd.google-apps.folder") folders.push(entry);
         else files.push(entry);
       }
       return json({ files, folders }, {}, origin);
     }
 
-    // ------- SHARE STATUS (GET) / MAKE PUBLIC (POST) -------
+    // ------- SHARE -------
     if (path === "/share" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      if (file.trashed) return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
       const permissions = await listPermissions(env, fileId);
       const publicPerm = permissions.find((p) => p.type === "anyone" && p.role === "reader");
-      return json(
-        {
-          public: Boolean(publicPerm),
-          role: publicPerm?.role ?? null,
-          webViewLink: file.webViewLink ?? null,
-        },
-        {},
-        origin
-      );
+      return json({ public: Boolean(publicPerm), role: publicPerm?.role ?? null, webViewLink: file.webViewLink ?? null }, {}, origin);
     }
 
     if (path === "/share" && request.method === "POST") {
@@ -380,11 +418,9 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       if (!body || typeof body.fileId !== "string" || !body.fileId.trim()) {
         return err("INVALID_PAYLOAD", "fileId is required.", 400, origin);
       }
-      // Only files inside this workspace's root can be shared by the user.
       const file = await getFile(env, body.fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
+      if (file.trashed) return err("ITEM_IN_TRASH", "Cannot share an item that is in Trash.", 400, origin);
       const shared = await ensurePublicPermission(env, body.fileId);
       return json({ webViewLink: shared.webViewLink }, {}, origin);
     }
@@ -393,47 +429,43 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     if (path === "/move" && request.method === "POST") {
       const workspace = await requireAuth(request, env);
       const body = (await request.json().catch(() => null)) as { fileIds?: unknown; parentId?: unknown } | null;
-      if (
-        !body ||
-        !Array.isArray(body.fileIds) ||
-        body.fileIds.length === 0 ||
-        !body.fileIds.every((id) => typeof id === "string")
-      ) {
+      if (!body || !Array.isArray(body.fileIds) || body.fileIds.length === 0 || !body.fileIds.every((id) => typeof id === "string")) {
         return err("INVALID_PAYLOAD", "fileIds must be a non-empty array of strings.", 400, origin);
+      }
+      const fileIds = body.fileIds as string[];
+      if (fileIds.length > MAX_BATCH) {
+        return err("INVALID_PAYLOAD", `Batch too large: ${fileIds.length} items. Maximum is ${MAX_BATCH} per request.`, 400, origin);
       }
       const parentId = body.parentId === null || body.parentId === undefined ? null : body.parentId;
       if (parentId !== null && typeof parentId !== "string") {
         return err("INVALID_PAYLOAD", "parentId must be a string or null.", 400, origin);
       }
-      // Destination must be a folder inside the workspace root.
       if (parentId) {
         const target = await getFile(env, parentId);
-        if (target.mimeType !== "application/vnd.google-apps.folder") {
-          return err("INVALID_PAYLOAD", "Destination is not a folder.", 400, origin);
-        }
-        if (!isInsideRoot(target, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-          return err("FORBIDDEN", "Destination is outside the workspace root.", 403, origin);
-        }
+        if (target.mimeType !== "application/vnd.google-apps.folder") return err("INVALID_PAYLOAD", "Destination is not a folder.", 400, origin);
+        if (!isInsideRoot(target, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "Destination is outside the workspace root.", 403, origin);
       }
+      const cache = new Map<string, Awaited<ReturnType<typeof getFile>>>();
       let moved = 0;
-      for (const fileId of body.fileIds as string[]) {
-        const file = await getFile(env, fileId);
-        if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) continue;
-        await moveFile(env, fileId, parentId ?? env.GOOGLE_DRIVE_ROOT);
-        moved += 1;
+      const failed: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          const file = await getFile(env, fileId);
+          if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env, cache)) { failed.push(fileId); continue; }
+          await moveFile(env, fileId, parentId ?? env.GOOGLE_DRIVE_ROOT);
+          moved += 1;
+        } catch { failed.push(fileId); }
       }
-      return json({ ok: true, moved }, {}, origin);
+      return json({ ok: true, moved, failed }, {}, origin);
     }
 
-    // ------- DOWNLOAD (single file) -------
+    // ------- DOWNLOAD -------
     if (path === "/download" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const fileId = url.searchParams.get("id");
       if (!fileId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const file = await getFile(env, fileId);
-      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
-      }
+      if (!isInsideRoot(file, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "File is outside the workspace root.", 403, origin);
       const media = await fetchMedia(env, fileId);
       const headers = new Headers(CORS_HEADERS(origin));
       headers.set("Content-Type", file.mimeType);
@@ -443,17 +475,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       return new Response(media.body, { status: media.status, headers });
     }
 
-    // ------- DOWNLOAD FOLDER (as ZIP) -------
     if (path === "/download/folder" && request.method === "GET") {
       const workspace = await requireAuth(request, env);
       const folderId = url.searchParams.get("id");
       if (!folderId) return err("MISSING_QUERY_PARAM", "Query parameter 'id' is required.", 400, origin);
       const folder = await getFile(env, folderId);
-      if (!isInsideRoot(folder, env.GOOGLE_DRIVE_ROOT, workspace, env)) {
-        return err("FORBIDDEN", "Folder is outside the workspace root.", 403, origin);
-      }
-      // Prefix entries with the folder's own name so the ZIP contains the
-      // folder itself (e.g. "Vacation/photo1.jpg"), like Drive exports do.
+      if (!isInsideRoot(folder, env.GOOGLE_DRIVE_ROOT, workspace, env)) return err("FORBIDDEN", "Folder is outside the workspace root.", 403, origin);
       const subtree = await collectSubtree(env, folderId, folder.name);
       const entries = [{ path: `${folder.name}/`, data: new Uint8Array(0) }, ...subtree];
       const zip = buildZip(entries);
@@ -466,28 +493,18 @@ export async function handle(request: Request, env: Env): Promise<Response> {
 
     return err("NOT_FOUND", `Unknown route: ${request.method} ${path}`, 404, origin);
   } catch (e) {
-    if (e instanceof HttpError) {
-      return err(codeFor(e), e.message, e.status, origin);
-    }
+    if (e instanceof HttpError) return err(codeFor(e), e.message, e.status, origin);
     const message = e instanceof Error ? e.message : "Unknown error";
     return err("INTERNAL_ERROR", message, 500, origin);
   }
 }
 
-/**
- * Constant-time string comparison. Both inputs are coerced to UTF-8
- * bytes. Returns false on length mismatch without leaking the
- * expected length via early-return timing.
- */
 async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder();
   const ab = enc.encode(a);
   const bb = enc.encode(b);
   if (ab.length !== bb.length) {
-    // Hash the second argument so the comparison still takes
-    // time proportional to its length.
     const hash = await crypto.subtle.digest("SHA-256", bb);
-    // Touch the hash so the engine doesn't optimize the call away.
     void hash.byteLength;
     return false;
   }
@@ -496,41 +513,23 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0;
 }
 
-/**
- * Sanitizes a filename for use inside a Content-Disposition header
- * (quotes and control characters would break the header).
- */
 function sanitizeFilename(name: string): string {
   return name.replace(/["\r\n]/g, "_").replace(/\\/g, "_");
 }
 
-/**
- * Resolves a search result's path inside the workspace root. Returns:
- *   - a path string (segments joined with "/", e.g. "A/B") when the item
- *     is inside the workspace subtree,
- *   - null when the item is a direct child of the workspace folder,
- *   - undefined when the item is outside the workspace (caller skips it).
- * Uses the shared `cache` to avoid repeated getFile calls per search.
- */
 async function scopedSearchPath(
-  env: Env,
-  file: { parents?: string[] },
-  rootId: string,
-  workspace: Workspace,
+  env: Env, file: { parents?: string[] }, rootId: string, workspace: Workspace,
   cache: Map<string, Awaited<ReturnType<typeof getFile>>>
 ): Promise<string | null | undefined> {
   if (!file.parents || file.parents.length === 0) return undefined;
-  if (file.parents.includes(rootId)) return undefined; // sibling of the workspace folder
+  if (file.parents.includes(rootId)) return undefined;
   const names: string[] = [];
   let current: string | undefined = file.parents[0];
   const seen = new Set<string>();
   while (current && !seen.has(current)) {
     seen.add(current);
     let f = cache.get(current);
-    if (!f) {
-      f = await getFile(env, current);
-      cache.set(current, f);
-    }
+    if (!f) { f = await getFile(env, current); cache.set(current, f); }
     if (current === rootId) return names.join("/");
     if (f.name === workspace) return names.length ? names.join("/") : null;
     names.unshift(f.name);
@@ -539,16 +538,9 @@ async function scopedSearchPath(
   return undefined;
 }
 
-/** Walks parents from the file up to GOOGLE_DRIVE_ROOT, ensuring the
- *  walk passes through the workspace's sub-folder. This prevents a user
- *  with one workspace from accessing another workspace's files even if
- *  they somehow obtained a file id.
- */
 async function isInsideRoot(
-  file: { id: string; parents?: string[] },
-  rootId: string,
-  workspace: Workspace,
-  env: Env
+  file: { id: string; parents?: string[] }, rootId: string, workspace: Workspace, env: Env,
+  cache?: Map<string, Awaited<ReturnType<typeof getFile>>>
 ): Promise<boolean> {
   if (file.parents?.includes(rootId)) return true;
   let current: string | undefined = file.parents?.[0];
@@ -556,12 +548,14 @@ async function isInsideRoot(
   while (current && !seen.has(current)) {
     seen.add(current);
     if (current === rootId) return true;
-    const f = await getFile(env, current);
+    let f = cache?.get(current);
+    if (!f) { f = await getFile(env, current); cache?.set(current, f); }
+    if (f.name === workspace) return true;
     current = f.parents?.[0];
   }
-  // Confirm at least one ancestor is the workspace folder
   for (const id of seen) {
-    const f = await getFile(env, id);
+    let f = cache?.get(id);
+    if (!f) { f = await getFile(env, id); cache?.set(id, f); }
     if (f.name === workspace) return true;
   }
   return false;

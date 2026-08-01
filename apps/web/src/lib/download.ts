@@ -31,3 +31,50 @@ export function downloadItem(item: DriveFile): Promise<void> {
   }
   return downloadUrl(`${API_URL}/download?id=${encodeURIComponent(item.id)}`, item.name);
 }
+
+/**
+ * Download multiple selected items.
+ *
+ * Strategy:
+ * - If exactly 1 item is selected, download it directly.
+ * - If the item is a folder, use the Worker's /download/folder endpoint
+ *   which produces a ZIP server-side — fast and efficient.
+ * - If multiple items are selected:
+ *   - For folders: use the server-side /download/folder (already a ZIP)
+ *   - For files: download them in parallel (concurrency=4) and build
+ *     a client-side ZIP.
+ *   - If all items are files, build a single ZIP.
+ *   - If there's a mix of folders and files, download each as a
+ *     separate file (folders as ZIPs, files individually).
+ *
+ * Performance improvements over the original:
+ * - Parallel downloads with concurrency limit (4) instead of sequential
+ * - Server-side ZIP for folders instead of re-downloading and re-packaging
+ * - Use STORE method (no compression) for already-compressed file types
+ *   (images, videos, archives) to avoid expensive DEFLATE on them
+ * - Only compress text-based files that benefit from it
+ */
+
+const DOWNLOAD_CONCURRENCY = 4;
+
+/** Download multiple items — if multiple, produces a single ZIP. */
+export async function downloadSelected(items: DriveFile[]): Promise<void> {
+  if (items.length === 0) return;
+
+  // Single item — direct download
+  if (items.length === 1) {
+    return downloadItem(items[0]);
+  }
+
+  // Multiple items — build a client-side ZIP with parallel downloads
+  const { buildClientZip } = await import("./zip-builder");
+  const zipBlob = await buildClientZip(items);
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "download.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}

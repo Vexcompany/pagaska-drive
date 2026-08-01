@@ -20,7 +20,8 @@ export type HttpErrorCode =
   | "INTERNAL_ERROR"
   | "NOT_FOUND"
   | "MISSING_CONFIG"
-  | "CONFIG_ERROR";
+  | "CONFIG_ERROR"
+  | "ITEM_IN_TRASH";
 
 export class HttpError extends Error {
   constructor(
@@ -64,6 +65,10 @@ async function authedFetch(url: string, init: RequestInit, env: Parameters<typeo
   return fetch(url, { ...init, headers });
 }
 
+/** Standard fields requested from Drive for file listings and detail lookups. */
+const FILE_FIELDS = "files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime,trashed)";
+const FILE_FIELDS_SINGLE = "id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime,trashed";
+
 export interface DriveFile {
   id: string;
   name: string;
@@ -73,15 +78,14 @@ export interface DriveFile {
   thumbnailLink: string | null;
   webViewLink: string | null;
   modifiedTime: string | null;
+  trashed: boolean;
 }
 
 /** Find a folder by name inside a parent. Returns `null` if not found. */
 export async function findFolder(env: Parameters<typeof getAccessToken>[0], parentId: string, name: string): Promise<DriveFile | null> {
-  // Defensive: normalize the name to a string before .replace to
-  // avoid runtime errors if the caller ever passes `undefined`.
   const safeName = typeof name === "string" ? name : "";
   const q = `mimeType='application/vnd.google-apps.folder' and name='${safeName.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
-  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=${FILE_FIELDS}`;
   const res = await authedFetch(url, { method: "GET" }, env);
   if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const data = (await res.json()) as { files: DriveFile[] };
@@ -108,11 +112,12 @@ export async function ensureFolder(env: Parameters<typeof getAccessToken>[0], pa
   return createFolder(env, parentId, name);
 }
 
-export async function listChildren(env: Parameters<typeof getAccessToken>[0], folderId: string | null): Promise<DriveFile[]> {
+export async function listChildren(env: Parameters<typeof getAccessToken>[0], folderId: string | null, includeTrashed = false): Promise<DriveFile[]> {
+  const trashedFilter = includeTrashed ? "" : " and trashed=false";
   const q = folderId
-    ? `'${folderId}' in parents and trashed=false`
-    : `'root' in parents and trashed=false`;
-  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)&pageSize=1000&orderBy=folder,name`;
+    ? `'${folderId}' in parents${trashedFilter}`
+    : `'root' in parents${trashedFilter}`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=${FILE_FIELDS}&pageSize=1000&orderBy=folder,name`;
   const res = await authedFetch(url, { method: "GET" }, env);
   if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const data = (await res.json()) as { files: DriveFile[] };
@@ -120,7 +125,7 @@ export async function listChildren(env: Parameters<typeof getAccessToken>[0], fo
 }
 
 export async function getFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<DriveFile> {
-  const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime`;
+  const url = `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=${FILE_FIELDS_SINGLE}`;
   const res = await authedFetch(url, { method: "GET" }, env);
   if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   return (await res.json()) as DriveFile;
@@ -142,6 +147,57 @@ export async function getBreadcrumb(env: Parameters<typeof getAccessToken>[0], f
 export async function deleteFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<void> {
   const res = await authedFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}`, { method: "DELETE" }, env);
   if (!res.ok && res.status !== 204) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+}
+
+/** Move a file or folder to trash (sets trashed=true on Drive). */
+export async function trashFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<DriveFile> {
+  const res = await authedFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trashed: true }),
+    },
+    env
+  );
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  return (await res.json()) as DriveFile;
+}
+
+/** Restore a file or folder from trash (sets trashed=false on Drive). */
+export async function restoreFile(env: Parameters<typeof getAccessToken>[0], fileId: string): Promise<DriveFile> {
+  const res = await authedFetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trashed: false }),
+    },
+    env
+  );
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  return (await res.json()) as DriveFile;
+}
+
+/** List all trashed items in the Drive (caller must filter by workspace root). */
+export async function listTrashed(env: Parameters<typeof getAccessToken>[0]): Promise<DriveFile[]> {
+  const q = `trashed=true`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=${FILE_FIELDS}&pageSize=1000&orderBy=folder,name`;
+  const res = await authedFetch(url, { method: "GET" }, env);
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  const data = (await res.json()) as { files: DriveFile[] };
+  return data.files ?? [];
+}
+
+/** Search within trashed items only. */
+export async function searchTrashed(env: Parameters<typeof getAccessToken>[0], query: string): Promise<DriveFile[]> {
+  const safe = query.replace(/'/g, "\\'");
+  const q = `name contains '${safe}' and trashed=true`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=${FILE_FIELDS}&pageSize=200&orderBy=folder,name`;
+  const res = await authedFetch(url, { method: "GET" }, env);
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  const data = (await res.json()) as { files: DriveFile[] };
+  return data.files ?? [];
 }
 
 export async function renameFile(env: Parameters<typeof getAccessToken>[0], fileId: string, name: string): Promise<DriveFile> {
@@ -196,7 +252,7 @@ export async function searchDrive(
 ): Promise<DriveFile[]> {
   const safe = query.replace(/'/g, "\\'");
   const q = `name contains '${safe}' and trashed = false`;
-  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,parents,thumbnailLink,webViewLink,modifiedTime)&pageSize=200&orderBy=folder,name`;
+  const url = `${DRIVE_API}/files?q=${encodeURIComponent(q)}&fields=${FILE_FIELDS}&pageSize=200&orderBy=folder,name`;
   const res = await authedFetch(url, { method: "GET" }, env);
   if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
   const data = (await res.json()) as { files: DriveFile[] };
@@ -289,10 +345,7 @@ export async function collectSubtree(
 
 /**
  * Make a file or folder readable by anyone with the link. Drive treats
- * folders as files for permissions, so this works for both. The check
- * lists existing permissions first and only creates one when the file is
- * still restricted (no `anyone`/`reader` entry yet), so re-sharing an
- * already-public item is a no-op.
+ * folders as files for permissions, so this works for both.
  */
 export async function ensurePublicPermission(
   env: Parameters<typeof getAccessToken>[0],
@@ -380,11 +433,6 @@ export async function forwardChunk(
       const m = /bytes=0-(\d+)/.exec(range);
       if (m) {
         const acknowledged = Number(m[1]) + 1;
-        // Drive has every byte but answered 308 because the last chunk
-        // ended on a 256 KiB boundary, so the session is not finalized
-        // until the client sends the empty final request. Without this
-        // step the upload is never marked complete and the file stays
-        // stuck in "uploading" on the client.
         if (acknowledged >= args.total) {
           const finalRes = await fetch(args.sessionUri, {
             method: "PUT",

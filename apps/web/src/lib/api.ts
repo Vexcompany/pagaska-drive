@@ -20,10 +20,63 @@ import type {
   ShareStatusResponse,
   StartUploadRequest,
   StartUploadResponse,
+  TrashDeleteForeverRequest,
+  TrashDeleteForeverResponse,
+  TrashListResponse,
+  TrashRequest,
+  TrashResponse,
+  TrashRestoreRequest,
+  TrashRestoreResponse,
+  TrashSearchResponse,
   Workspace,
 } from "@pagaska/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+
+/** Maximum items per batch request (must match the backend MAX_BATCH). */
+export const MAX_BATCH = 20;
+
+/** Progress state for a batched operation across multiple API calls. */
+export interface BatchProgress {
+  total: number;
+  done: number;
+  failed: string[];
+  succeeded: string[];
+  running: boolean;
+}
+
+/**
+ * Split `ids` into chunks of MAX_BATCH and call `fn` sequentially.
+ * Reports progress after each chunk.  Continues on partial failure
+ * so the caller can show which items failed.
+ */
+export async function batchOperation(
+  ids: string[],
+  fn: (batchIds: string[]) => Promise<{ succeeded: number; failed: string[] }>,
+  onProgress?: (progress: BatchProgress) => void,
+): Promise<BatchProgress> {
+  const progress: BatchProgress = { total: ids.length, done: 0, failed: [], succeeded: [], running: true };
+  onProgress?.(progress);
+
+  for (let i = 0; i < ids.length; i += MAX_BATCH) {
+    const chunk = ids.slice(i, i + MAX_BATCH);
+    try {
+      const res = await fn(chunk);
+      progress.succeeded.push(...chunk.slice(0, res.succeeded));
+      progress.failed.push(...res.failed);
+      progress.done += chunk.length;
+    } catch {
+      // Entire chunk failed — treat all items as failed
+      progress.failed.push(...chunk);
+      progress.done += chunk.length;
+    }
+    onProgress?.(progress);
+  }
+
+  progress.running = false;
+  onProgress?.(progress);
+  return progress;
+}
 
 /**
  * Structured API error. The Worker always returns
@@ -65,7 +118,6 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
       },
     });
   } catch (err) {
-    // Network-level failure: no HTTP status at all.
     throw new ApiError(0, "INTERNAL_ERROR", err instanceof Error ? err.message : "Network error.");
   }
   if (!res.ok) {
@@ -100,6 +152,7 @@ export const api = {
   async createFolder(req: CreateFolderRequest): Promise<{ folder: DriveFolder }> {
     return call("/folders", { method: "POST", body: JSON.stringify(req) });
   },
+  /** Move to trash (replaces the old permanent delete). */
   async deleteFile(id: string): Promise<{ ok: true }> {
     return call(`/files/${id}`, { method: "DELETE" });
   },
@@ -110,8 +163,6 @@ export const api = {
     return call("/upload/start", { method: "POST", body: JSON.stringify(req) });
   },
   async finishUpload(req: FinishUploadRequest): Promise<FinishUploadResponse> {
-    // The engine has already finalized the upload via the session URI;
-    // we hit /upload/finish to confirm the file is visible to the user.
     const fileId = await readFileIdFromSession(req.sessionUri);
     return call<FinishUploadResponse>("/upload/finish", { method: "POST", body: JSON.stringify({ fileId }) });
   },
@@ -131,20 +182,33 @@ export const api = {
   async move(req: MoveRequest): Promise<MoveResponse> {
     return call<MoveResponse>("/move", { method: "POST", body: JSON.stringify(req) });
   },
+
+  // ── Trash ──────────────────────────────────────────────────────────────
+
+  /** List all trashed items in the workspace. */
+  async listTrash(): Promise<TrashListResponse> {
+    return call<TrashListResponse>("/trash");
+  },
+  /** Move items to trash (batch). */
+  async trashItems(req: TrashRequest): Promise<TrashResponse> {
+    return call<TrashResponse>("/trash", { method: "POST", body: JSON.stringify(req) });
+  },
+  /** Restore items from trash (batch). */
+  async restoreItems(req: TrashRestoreRequest): Promise<TrashRestoreResponse> {
+    return call<TrashRestoreResponse>("/trash/restore", { method: "POST", body: JSON.stringify(req) });
+  },
+  /** Permanently delete items ("Delete Forever"). */
+  async deleteForever(req: TrashDeleteForeverRequest): Promise<TrashDeleteForeverResponse> {
+    return call<TrashDeleteForeverResponse>("/trash", { method: "DELETE", body: JSON.stringify(req) });
+  },
+  /** Search within trashed items. */
+  async searchTrash(q: string): Promise<TrashSearchResponse> {
+    return call<TrashSearchResponse>(`/trash/search?q=${encodeURIComponent(q)}`);
+  },
 };
 
 export { TOKEN_KEY, WORKSPACE_KEY };
 
-/**
- * The engine hands us back the Drive session URI after the final chunk.
- * We need the resulting file id, which is on the final 200/201 response.
- * For simplicity, we ask the user to refresh after a moment — but in
- * practice the engine captures the file id internally. We use a small
- * helper that asks the server to look it up.
- */
 async function readFileIdFromSession(_sessionUri: string): Promise<string> {
-  // The Worker exposes a /upload/finish convenience endpoint that
-  // expects the file id. The engine returns it in its own internal
-  // callback, so this helper is overridden in the upload client.
   return "";
 }

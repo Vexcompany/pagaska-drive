@@ -13,6 +13,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Workspace } from "@pagaska/shared";
 import { AuthContext, type AuthState } from "./auth-context";
 import { api, TOKEN_KEY, WORKSPACE_KEY } from "./api";
+import { FloatingUploadPanel } from "@/components/FloatingUploadPanel";
+import { useToastSubscription, dismissToast, type ToastType } from "@/stores/useToastStore";
+import { CheckCircle2, AlertCircle, Info, XCircle } from "lucide-react";
 
 /**
  * Storage keys are versioned. The previous version used
@@ -20,6 +23,13 @@ import { api, TOKEN_KEY, WORKSPACE_KEY } from "./api";
  * during a one-version rollout and always writes to the new ones.
  */
 const LEGACY_PROFILE_KEY = "pagaska.profile";
+
+/**
+ * When a workspace switch is requested, the target workspace name
+ * is stored under this key so the login page can pre-select it.
+ * The key is cleared after it is consumed.
+ */
+export const PENDING_SWITCH_KEY = "pagaska.pendingSwitch";
 
 function readStoredWorkspace(): Workspace | null {
   if (typeof window === "undefined") return null;
@@ -55,6 +65,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.localStorage.setItem(TOKEN_KEY, session.token);
     window.localStorage.setItem(WORKSPACE_KEY, session.workspace);
     window.localStorage.removeItem(LEGACY_PROFILE_KEY);
+    window.localStorage.removeItem(PENDING_SWITCH_KEY);
     setToken(session.token);
     setWorkspace(session.workspace);
   }, []);
@@ -63,14 +74,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.localStorage.removeItem(TOKEN_KEY);
     window.localStorage.removeItem(WORKSPACE_KEY);
     window.localStorage.removeItem(LEGACY_PROFILE_KEY);
+    window.localStorage.removeItem(PENDING_SWITCH_KEY);
+    setToken(null);
+    setWorkspace(null);
+  }, []);
+
+  const switchWorkspace = useCallback((next: Workspace) => {
+    // Clear all auth state so the login page does not auto-restore
+    // the previous workspace from localStorage.
+    window.localStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem(WORKSPACE_KEY);
+    window.localStorage.removeItem(LEGACY_PROFILE_KEY);
+    // Store a hint so the login page pre-selects the target workspace.
+    window.localStorage.setItem(PENDING_SWITCH_KEY, next);
+    // Setting workspace to null triggers the redirect to "/" on
+    // every authenticated page. The login page will read the hint
+    // and pre-select the target workspace.
     setToken(null);
     setWorkspace(null);
   }, []);
 
   const value = useMemo<AuthState>(
-    () => ({ workspace, token, loading, login, logout }),
-    [workspace, token, loading, login, logout]
+    () => ({ workspace, token, loading, login, logout, switchWorkspace }),
+    [workspace, token, loading, login, logout, switchWorkspace]
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      {/* Floating upload panel — persists across all pages */}
+      <FloatingUploadPanel />
+      {/* Global toast — shows success/error/info notifications */}
+      <GlobalToast />
+    </AuthContext.Provider>
+  );
+}
+
+// ── Global Toast ──────────────────────────────────────────────────────────
+// Renders the current toast from the global toast store.
+
+function GlobalToast() {
+  const toast = useToastSubscription();
+  if (!toast) return null;
+
+  const icons: Record<ToastType, typeof CheckCircle2> = {
+    success: CheckCircle2,
+    error: AlertCircle,
+    info: Info,
+  };
+  const colors: Record<ToastType, string> = {
+    success: "text-emerald-400",
+    error: "text-red-400",
+    info: "text-brand-400",
+  };
+  const Icon = icons[toast.type];
+
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-pop-in">
+      <div className="flex items-center gap-3 rounded-xl bg-slate-900 text-white px-4 py-3 shadow-lg text-sm">
+        <Icon className={`h-4 w-4 shrink-0 ${colors[toast.type]}`} />
+        <span>{toast.message}</span>
+        {toast.action && (
+          <button
+            onClick={toast.action.onClick}
+            className="font-semibold text-brand-400 hover:text-brand-300 transition-colors whitespace-nowrap"
+          >
+            {toast.action.label}
+          </button>
+        )}
+        <button onClick={dismissToast} className="text-slate-400 hover:text-slate-200 ml-1">
+          <XCircle className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
 }
