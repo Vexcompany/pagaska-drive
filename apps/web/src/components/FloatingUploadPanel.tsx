@@ -4,7 +4,6 @@
  * Floating upload panel — appears at the bottom-right of the screen
  * when uploads are active. Can be minimized to a small pill or
  * expanded to show per-file progress.
- *
  * Uploads continue while the user browses the drive.
  */
 
