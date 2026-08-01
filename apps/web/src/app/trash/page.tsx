@@ -44,8 +44,10 @@ import {
   Modal,
   ErrorBanner,
   ContextMenu,
+  ConfirmDialog,
 } from "@/components/ui";
 import type { DriveFile, SearchItem, TrashListResponse, TrashSearchResponse } from "@pagaska/shared";
+import { showToast } from "@/stores/useToastStore";
 
 type ViewMode = "grid" | "list";
 type SortKey = "name" | "modified" | "size" | "type";
@@ -102,6 +104,15 @@ function TrashInner() {
 
   // Properties dialog
   const [propsItem, setPropsItem] = useState<DriveFile | null>(null);
+
+  // Confirm dialog for permanent delete
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({ open: false, title: "", message: "", onConfirm: () => {} });
+  const [confirmLoading, setConfirmLoading] = useState(false);
 
   const isSearching = Boolean(query.trim()) && results !== null;
 
@@ -204,6 +215,8 @@ function TrashInner() {
       setSelected(new Set());
       if (result.failed.length > 0) {
         setError(`${result.failed.length} item(s) could not be restored.`);
+      } else {
+        showToast("Restored successfully");
       }
       void refresh();
     } catch (err) {
@@ -215,6 +228,7 @@ function TrashInner() {
     try {
       await api.restoreItems({ fileIds: [id] });
       setSelected((prev) => { const next = new Set(prev); next.delete(id); return next; });
+      showToast("Restored successfully");
       void refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Restore failed.");
@@ -224,34 +238,57 @@ function TrashInner() {
   async function deleteForeverSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Permanently delete ${ids.length} item${ids.length > 1 ? "s" : ""}? This cannot be undone.`)) return;
-    try {
-      const result = await batchOperation(
-        ids,
-        async (chunk) => {
-          const res = await api.deleteForever({ fileIds: chunk });
-          return { succeeded: res.deleted, failed: res.failed ?? [] };
-        },
-      );
-      setSelected(new Set());
-      if (result.failed.length > 0) {
-        setError(`${result.failed.length} item(s) could not be permanently deleted.`);
-      }
-      void refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete forever failed.");
-    }
+    setConfirmDialog({
+      open: true,
+      title: "Delete forever?",
+      message: `${ids.length} item${ids.length > 1 ? "s" : ""} will be permanently deleted. This cannot be undone.`,
+      onConfirm: async () => {
+        setConfirmLoading(true);
+        try {
+          const result = await batchOperation(
+            ids,
+            async (chunk) => {
+              const res = await api.deleteForever({ fileIds: chunk });
+              return { succeeded: res.deleted, failed: res.failed ?? [] };
+            },
+          );
+          setSelected(new Set());
+          if (result.failed.length > 0) {
+            setError(`${result.failed.length} item(s) could not be permanently deleted.`);
+          } else {
+            showToast("Permanently deleted");
+          }
+          void refresh();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Delete forever failed.");
+        } finally {
+          setConfirmLoading(false);
+          setConfirmDialog((d) => ({ ...d, open: false }));
+        }
+      },
+    });
   }
 
   async function deleteForeverOne(id: string, name: string) {
-    if (!confirm(`Permanently delete "${name}"? This cannot be undone.`)) return;
-    try {
-      await api.deleteForever({ fileIds: [id] });
-      setSelected((prev) => { const next = new Set(prev); next.delete(id); return next; });
-      void refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete forever failed.");
-    }
+    setConfirmDialog({
+      open: true,
+      title: "Delete forever?",
+      message: `"${name}" will be permanently deleted. This cannot be undone.`,
+      onConfirm: async () => {
+        setConfirmLoading(true);
+        try {
+          await api.deleteForever({ fileIds: [id] });
+          setSelected((prev) => { const next = new Set(prev); next.delete(id); return next; });
+          showToast("Permanently deleted");
+          void refresh();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Delete forever failed.");
+        } finally {
+          setConfirmLoading(false);
+          setConfirmDialog((d) => ({ ...d, open: false }));
+        }
+      },
+    });
   }
 
   // ── Selection ───────────────────────────────────────────────────────────
@@ -549,6 +586,18 @@ function TrashInner() {
 
       {/* Close sort menu on outside click */}
       {showSortMenu && <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />}
+
+      {/* Confirm dialog for permanent delete */}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmLabel="Delete forever"
+        danger
+        loading={confirmLoading}
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => setConfirmDialog((d) => ({ ...d, open: false }))}
+      />
     </main>
   );
 }
