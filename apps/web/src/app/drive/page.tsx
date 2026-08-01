@@ -5,7 +5,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
-import { downloadItem } from "@/lib/download";
+import { downloadSelected } from "@/lib/download";
+import { formatSize, formatDate, typeLabel } from "@/lib/format";
+import { addFilesToPanel } from "@/hooks/useUploadPanel";
+import { setFolderCover, removeCoverByImage, getFolderCover } from "@/stores/useFolderCoverStore";
+import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
+import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
+import { PropertiesPanel } from "@/components/PropertiesPanel";
 import {
   Folder,
   FileText,
@@ -38,6 +44,10 @@ import {
   ChevronRight,
   Loader2,
   SlidersHorizontal,
+  Info,
+  ImagePlus,
+  CloudUpload,
+  Eye,
 } from "lucide-react";
 import {
   Button,
@@ -48,6 +58,7 @@ import {
   Modal,
   ErrorBanner,
   Toast,
+  ContextMenu,
 } from "@/components/ui";
 import type {
   DriveFile,
@@ -128,6 +139,15 @@ function DriveInner() {
   const [moveCrumbs, setMoveCrumbs] = useState<{ id: string; name: string }[]>([]);
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // Properties panel
+  const [propsItem, setPropsItem] = useState<DriveFile | null>(null);
+
+  // Context menu
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: DriveFile } | null>(null);
+
+  // Upload drag state
+  const [dragOver, setDragOver] = useState(false);
+
   // ── Undo toast for "Move to Trash" ──────────────────────────────────────
   const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[] }>({
     visible: false,
@@ -156,17 +176,14 @@ function DriveInner() {
 
   // ── Helpers: URL-based navigation ───────────────────────────────────────
 
-  /** Navigate to a folder by pushing a new URL entry (creates browser history). */
   function navigateToFolder(id: string | null) {
     router.push(id ? `/drive?folderId=${id}` : "/drive");
   }
 
-  /** Open a file preview, preserving folder context and scroll position. */
   function openItem(item: DriveFile) {
     if (item.mimeType === "application/vnd.google-apps.folder") {
       navigateToFolder(item.id);
     } else {
-      // Save scroll position so the preview back-button can restore it
       try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch { /* */ }
       const folderParam = folderId ? `&folderId=${encodeURIComponent(folderId)}` : "";
       router.push(`/preview?id=${encodeURIComponent(item.id)}${folderParam}`);
@@ -195,7 +212,6 @@ function DriveInner() {
     if (workspace) void refresh(folderId);
   }, [workspace, folderId, refresh]);
 
-  // ── Restore scroll position when returning from preview ─────────────────
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem(SCROLL_KEY);
@@ -261,7 +277,6 @@ function DriveInner() {
     }
   }
 
-  /** Move one item to trash (no confirmation). */
   async function deleteOne(id: string) {
     try {
       await api.deleteFile(id);
@@ -272,7 +287,6 @@ function DriveInner() {
     }
   }
 
-  /** Move selected items to trash (batched, max MAX_BATCH per request). */
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
@@ -295,14 +309,13 @@ function DriveInner() {
     }
   }
 
-  async function downloadSelected() {
-    for (const item of ordered) {
-      if (!selected.has(item.id)) continue;
-      try {
-        await downloadItem(item);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : `Failed to download ${item.name}.`);
-      }
+  async function handleDownloadSelected() {
+    const items = ordered.filter((i) => selected.has(i.id));
+    if (items.length === 0) return;
+    try {
+      await downloadSelected(items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Download failed.");
     }
   }
 
@@ -315,6 +328,40 @@ function DriveInner() {
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rename failed.");
+    }
+  }
+
+  // ── Upload handling ─────────────────────────────────────────────────────
+
+  function handleUploadFiles(fileList: FileList | File[]) {
+    const rawFiles = Array.from(fileList);
+    if (rawFiles.length === 0) return;
+    addFilesToPanel(rawFiles, folderId);
+  }
+
+  function onFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const list = e.target.files;
+    if (!list || list.length === 0) return;
+    handleUploadFiles(list);
+    e.target.value = "";
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const rawFiles: File[] = [];
+    const items = e.dataTransfer.items;
+    if (items && items.length && "webkitGetAsEntry" in items[0]) {
+      const entries: PagaskaFsEntry[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry?.() as PagaskaFsEntry | null;
+        if (entry) entries.push(entry);
+      }
+      collectEntries(entries, rawFiles).then(() => {
+        if (rawFiles.length > 0) addFilesToPanel(rawFiles, folderId);
+      });
+    } else {
+      handleUploadFiles(e.dataTransfer.files);
     }
   }
 
@@ -338,11 +385,15 @@ function DriveInner() {
     setSelected(new Set(ids.slice(lo, hi + 1)));
   }
 
-  /** Click on a row (not on filename or checkbox) – selects, never navigates. */
   function handleRowClick(e: React.MouseEvent, item: DriveFile, index: number) {
     if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleSelect(item.id); return; }
     if (e.shiftKey && lastClicked.current) { e.preventDefault(); selectRange(lastClicked.current, item.id); return; }
     toggleSelect(item.id);
+  }
+
+  function handleContextMenu(e: React.MouseEvent, item: DriveFile) {
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY, item });
   }
 
   // ── Share ───────────────────────────────────────────────────────────────
@@ -390,14 +441,14 @@ function DriveInner() {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const isInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
-      const isModal = Boolean(shareItem || renaming || moveOpen);
+      const isModal = Boolean(shareItem || renaming || moveOpen || propsItem);
       if (isInput || isModal) {
-        // Escape still closes modals when fired from inputs
         if (e.key === "Escape" && isModal) {
           e.preventDefault();
           setShareItem(null);
           setRenaming(null);
           setMoveOpen(false);
+          setPropsItem(null);
         }
         return;
       }
@@ -413,7 +464,7 @@ function DriveInner() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [ordered, selected, shareItem, renaming, moveOpen]);
+  }, [ordered, selected, shareItem, renaming, moveOpen, propsItem]);
 
   // ── Move ────────────────────────────────────────────────────────────────
 
@@ -460,12 +511,44 @@ function DriveInner() {
     type: "File type",
   };
 
+  // Build context menu items
+  const ctxMenuItems = ctxMenu ? [
+    { label: "Open", icon: <Eye className="h-4 w-4" />, onClick: () => openItem(ctxMenu.item) },
+    { label: "Rename", icon: <Pencil className="h-4 w-4" />, onClick: () => { setRenaming(ctxMenu.item); setRenameValue(ctxMenu.item.name); } },
+    { label: "Share", icon: <LinkIcon className="h-4 w-4" />, onClick: () => void openShare(ctxMenu.item) },
+    { label: "Move", icon: <MoveRight className="h-4 w-4" />, onClick: () => { setMoveTargets([ctxMenu.item.id]); setMoveOpen(true); } },
+    { label: "Download", icon: <Download className="h-4 w-4" />, onClick: () => void downloadSelected([ctxMenu.item]) },
+    { label: "Properties", icon: <Info className="h-4 w-4" />, onClick: () => setPropsItem(ctxMenu.item) },
+    // Set as Folder Cover — only for images
+    ...(ctxMenu.item.mimeType.startsWith("image/") && folderId ? [{
+      label: "Set as Folder Cover", icon: <ImagePlus className="h-4 w-4" />, onClick: () => {
+        setFolderCover(folderId, ctxMenu.item.id);
+      }
+    }] : []),
+    { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteOne(ctxMenu.item.id), danger: true },
+  ] : [];
+
   return (
-    <main className="min-h-screen bg-slate-50">
+    <main
+      className="min-h-screen bg-slate-50"
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      {/* Upload drop overlay */}
+      {dragOver && (
+        <div className="fixed inset-0 z-50 bg-brand-500/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+          <div className="rounded-2xl bg-white p-8 shadow-2xl flex flex-col items-center gap-3 animate-pop-in">
+            <CloudUpload className="h-10 w-10 text-brand-500" />
+            <p className="text-lg font-semibold text-slate-900">Drop files to upload</p>
+            <p className="text-sm text-slate-400">Files will be uploaded to the current folder</p>
+          </div>
+        </div>
+      )}
+
       {/* Top nav */}
       <header className="sticky top-0 z-20 bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
-          {/* Logo + breadcrumb */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
               onClick={() => { navigateToFolder(null); setQuery(""); }}
@@ -488,27 +571,31 @@ function DriveInner() {
             {searchQuery && (
               <span className="flex items-center gap-1">
                 <ChevronRight className="h-3.5 w-3.5 text-slate-300" />
-                <span className="text-sm text-slate-600 truncate">"{searchQuery}"</span>
+                <span className="text-sm text-slate-600 truncate">&quot;{searchQuery}&quot;</span>
               </span>
             )}
           </div>
 
-          {/* Workspace label */}
+          {/* Folder stats */}
+          {data && !searchQuery && (
+            <FolderStatsDisplay files={data.files} folders={data.folders} className="hidden lg:inline" />
+          )}
+
           <span className="hidden md:flex items-center gap-1.5 text-xs text-slate-500 shrink-0">
             <User className="h-3.5 w-3.5" />
             {workspace}
           </span>
 
-          {/* Nav actions */}
           <div className="flex items-center gap-1 shrink-0">
             <Link href="/trash" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
               <Trash2 className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Trash</span>
             </Link>
-            <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
-                <Upload className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Upload</span>
-              </Link>
+            <label className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm cursor-pointer">
+              <Upload className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Upload</span>
+              <input type="file" multiple className="hidden" onChange={onFileInput} />
+            </label>
             <Link href="/profile" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
               <User className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Workspace</span>
@@ -529,7 +616,6 @@ function DriveInner() {
 
         {/* Toolbar */}
         <div className="flex flex-col sm:flex-row gap-2">
-          {/* Search */}
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
             <input
@@ -553,9 +639,7 @@ function DriveInner() {
             )}
           </div>
 
-          {/* Right controls */}
           <div className="flex gap-2 items-center">
-            {/* Sort dropdown */}
             <div className="relative">
               <button
                 onClick={() => setShowSortMenu((v) => !v)}
@@ -593,7 +677,6 @@ function DriveInner() {
               )}
             </div>
 
-            {/* View toggle */}
             <div className="flex rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
               <button
                 onClick={() => setView("list")}
@@ -611,7 +694,6 @@ function DriveInner() {
               </button>
             </div>
 
-            {/* New folder */}
             <button
               onClick={() => setShowNewFolder((v) => !v)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm hover:bg-slate-50 transition-all"
@@ -656,7 +738,7 @@ function DriveInner() {
               <Trash2 className="h-3.5 w-3.5" />
               Delete
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => void downloadSelected()}>
+            <Button variant="ghost" size="sm" onClick={() => void handleDownloadSelected()}>
               <Download className="h-3.5 w-3.5" />
               Download
             </Button>
@@ -690,6 +772,7 @@ function DriveInner() {
               query={searchQuery}
               atRoot={folderId === null}
               onClear={() => setQuery("")}
+              onUpload={() => document.getElementById("drive-upload-input")?.click()}
             />
           )}
 
@@ -727,6 +810,7 @@ function DriveInner() {
                       <tr
                         key={item.id}
                         onClick={(e) => handleRowClick(e, item, i)}
+                        onContextMenu={(e) => handleContextMenu(e, item)}
                         className={`group border-b border-slate-50 last:border-0 cursor-pointer select-none transition-colors duration-100 ${
                           isSel ? "bg-brand-50 hover:bg-brand-100/70" : "hover:bg-slate-50"
                         }`}
@@ -745,7 +829,6 @@ function DriveInner() {
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <FileIcon mime={item.mimeType} className="h-4 w-4 shrink-0 text-slate-400" isFolder={isFolder} />
-                            {/* Filename: click opens the item, never selects */}
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); openItem(item); }}
@@ -801,10 +884,13 @@ function DriveInner() {
               {ordered.map((item, i) => {
                 const isFolder = item.mimeType === "application/vnd.google-apps.folder";
                 const isSel = selected.has(item.id);
+                // Folder cover image
+                const coverUrl = isFolder && data ? getFolderCoverUrl(item.id, data.files) : null;
                 return (
                   <div
                     key={item.id}
                     onClick={(e) => handleRowClick(e, item, i)}
+                    onContextMenu={(e) => handleContextMenu(e, item)}
                     className={`group relative flex flex-col items-center rounded-2xl border p-3 cursor-pointer select-none transition-all duration-150 ${
                       isSel
                         ? "border-brand-300 ring-2 ring-brand-200 bg-brand-50 shadow-sm"
@@ -820,11 +906,10 @@ function DriveInner() {
                       onChange={() => toggleSelect(item.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
-                    {/* Thumbnail / icon area: click opens the item */}
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); openItem(item); }}
-                      className="h-16 w-16 flex items-center justify-center mb-2 focus:outline-none"
+                      className="h-16 w-16 flex items-center justify-center mb-2 focus:outline-none overflow-hidden"
                       title={item.name}
                     >
                       {!isFolder && item.thumbnailLink && item.mimeType.startsWith("image/") ? (
@@ -835,11 +920,18 @@ function DriveInner() {
                           className="h-full w-full object-cover rounded-xl shadow-sm"
                           loading="lazy"
                         />
+                      ) : isFolder && coverUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={coverUrl}
+                          alt=""
+                          className="h-full w-full object-cover rounded-xl shadow-sm"
+                          loading="lazy"
+                        />
                       ) : (
                         <FileIconLarge mime={item.mimeType} isFolder={isFolder} />
                       )}
                     </button>
-                    {/* Filename: click opens the item */}
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); openItem(item); }}
@@ -858,6 +950,9 @@ function DriveInner() {
           )}
         </Card>
       </div>
+
+      {/* Hidden upload input */}
+      <input id="drive-upload-input" type="file" multiple className="hidden" onChange={onFileInput} />
 
       {/* Rename modal */}
       <Modal open={Boolean(renaming)} onClose={() => setRenaming(null)} className="max-w-sm">
@@ -905,12 +1000,7 @@ function DriveInner() {
                   </Badge>
                 </div>
                 {!shareStatus.public ? (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => void makePublic()}
-                    loading={shareBusy}
-                  >
+                  <Button variant="primary" size="sm" onClick={() => void makePublic()} loading={shareBusy}>
                     <LinkIcon className="h-3.5 w-3.5" />
                     Enable link sharing
                   </Button>
@@ -919,12 +1009,7 @@ function DriveInner() {
                     <div className="text-xs text-slate-500">
                       Role: <span className="font-medium text-slate-700">{shareStatus.role === "reader" ? "Viewer" : shareStatus.role ?? "Viewer"}</span>
                     </div>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => void copyShareLink()}
-                      disabled={!shareStatus.webViewLink}
-                    >
+                    <Button variant="primary" size="sm" onClick={() => void copyShareLink()} disabled={!shareStatus.webViewLink}>
                       {shareCopied ? (
                         <><Check className="h-3.5 w-3.5" /> Copied</>
                       ) : (
@@ -952,7 +1037,6 @@ function DriveInner() {
           <p className="text-sm text-slate-500 mb-4">
             Moving {moveTargets.length} item{moveTargets.length > 1 ? "s" : ""} — select a destination
           </p>
-
           <nav className="flex items-center gap-1 text-sm mb-3 flex-wrap" aria-label="Move destination">
             <button
               onClick={() => { setMoveFolderId(null); setMoveCrumbs([]); }}
@@ -973,7 +1057,6 @@ function DriveInner() {
               </span>
             ))}
           </nav>
-
           <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-200">
             {moveFolders.length === 0 && (
               <div className="flex flex-col items-center justify-center py-8 gap-2 text-slate-400">
@@ -994,7 +1077,6 @@ function DriveInner() {
               </button>
             ))}
           </div>
-
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="ghost" onClick={() => setMoveOpen(false)}>Cancel</Button>
             <Button variant="primary" onClick={() => void confirmMove()} loading={moveBusy}>
@@ -1003,6 +1085,27 @@ function DriveInner() {
           </div>
         </Card>
       </Modal>
+
+      {/* Properties panel */}
+      {propsItem && data && (
+        <PropertiesPanel
+          item={propsItem}
+          breadcrumb={data.breadcrumb}
+          workspace={workspace}
+          folderId={folderId}
+          onClose={() => setPropsItem(null)}
+        />
+      )}
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxMenuItems}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
 
       {/* Close sort menu on outside click */}
       {showSortMenu && (
@@ -1075,27 +1178,6 @@ function compareItems(a: DriveFile, b: DriveFile, key: SortKey, dir: SortDir): n
   return dir === "asc" ? r : -r;
 }
 
-function typeLabel(mime: string): string {
-  return mime.split("/").pop() ?? mime;
-}
-
-function formatSize(bytes: string | number | null): string {
-  if (bytes == null) return "—";
-  const n = typeof bytes === "string" ? Number(bytes) : bytes;
-  if (!Number.isFinite(n)) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
 function SkeletonList({ view }: { view: ViewMode }) {
   if (view === "grid") {
     return (
@@ -1125,7 +1207,7 @@ function SkeletonList({ view }: { view: ViewMode }) {
   );
 }
 
-function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean; query: string; atRoot: boolean; onClear: () => void }) {
+function EmptyState({ searching, query, atRoot, onClear, onUpload }: { searching: boolean; query: string; atRoot: boolean; onClear: () => void; onUpload: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 px-6 text-center">
       {searching ? (
@@ -1133,7 +1215,7 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           <div className="rounded-2xl bg-slate-100 p-5 mb-4">
             <Search className="h-8 w-8 text-slate-400" />
           </div>
-          <p className="font-semibold text-slate-700">No results for "{query}"</p>
+          <p className="font-semibold text-slate-700">No results for &quot;{query}&quot;</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Try a different name or check the spelling.</p>
           <Button variant="ghost" size="sm" onClick={onClear}>
             <X className="h-4 w-4" /> Clear search
@@ -1146,9 +1228,12 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           </div>
           <p className="font-semibold text-slate-700">No files yet</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Upload files or create a folder to get started.</p>
-          <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-xl px-4 py-2 text-sm font-medium transition-all shadow-sm">
+          <button
+            onClick={onUpload}
+            className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-xl px-4 py-2 text-sm font-medium transition-all shadow-sm"
+          >
             <Upload className="h-4 w-4" /> Upload files
-          </Link>
+          </button>
         </>
       ) : (
         <>
@@ -1157,11 +1242,60 @@ function EmptyState({ searching, query, atRoot, onClear }: { searching: boolean;
           </div>
           <p className="font-semibold text-slate-700">This folder is empty</p>
           <p className="text-sm text-slate-400 mt-1 mb-4">Upload files or create a subfolder.</p>
-          <Link href="/upload" className="inline-flex items-center gap-1.5 text-slate-700 hover:bg-slate-100 rounded-xl px-4 py-2 text-sm font-medium transition-all border border-slate-200">
+          <button
+            onClick={onUpload}
+            className="inline-flex items-center gap-1.5 text-slate-700 hover:bg-slate-100 rounded-xl px-4 py-2 text-sm font-medium transition-all border border-slate-200"
+          >
             <Upload className="h-4 w-4" /> Upload files
-          </Link>
+          </button>
         </>
       )}
     </div>
   );
+}
+
+// ── File system entry helpers for drag & drop ────────────────────────────────
+
+interface PagaskaFsEntry {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  fullPath: string;
+  createReader(): { readEntries(cb: (entries: PagaskaFsEntry[]) => void): void };
+  file(cb: (f: File) => void): void;
+}
+
+function collectEntries(entries: PagaskaFsEntry[], out: File[]): Promise<void> {
+  return Promise.all(
+    entries.map(
+      (entry) =>
+        new Promise<void>((resolve) => {
+          if (entry.isFile) {
+            entry.file((f) => {
+              try {
+                Object.defineProperty(f, "webkitRelativePath", { value: entry.fullPath.replace(/^\//, "") });
+              } catch { /* readonly on some engines */ }
+              out.push(f);
+              resolve();
+            });
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const all: PagaskaFsEntry[] = [];
+            const read = () => {
+              reader.readEntries((batch) => {
+                if (batch.length === 0) {
+                  collectEntries(all, out).then(resolve);
+                } else {
+                  all.push(...batch);
+                  read();
+                }
+              });
+            };
+            read();
+          } else {
+            resolve();
+          }
+        })
+    )
+  ).then(() => undefined);
 }
