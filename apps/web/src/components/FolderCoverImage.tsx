@@ -6,7 +6,7 @@
  * even when the subfolder's file listing is not loaded.
  *
  * Uses useFolderCoverVersion to re-render when the cover store changes.
- *
+ * 
  * IMPORTANT: If no cover has been explicitly set by the user, this
  * component returns null — it never falls back to an unrelated image
  * from the current directory listing. The default folder icon is the
