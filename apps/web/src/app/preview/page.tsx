@@ -19,6 +19,10 @@ import {
   Eye,
   Loader2,
   AlertCircle,
+  ZoomIn,
+  ZoomOut,
+  Maximize,
+  Minimize,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { api, authHeaders } from "@/lib/api";
@@ -37,6 +41,8 @@ export default function PreviewPage() {
   );
 }
 
+type ZoomMode = "fit" | "original" | "custom";
+
 function PreviewInner() {
   const { workspace, loading } = useAuth();
   const router = useRouter();
@@ -47,6 +53,39 @@ function PreviewInner() {
   const [data, setData] = useState<PreviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { blobUrl: contentUrl, error: contentError, loading: contentLoading } = useAuthedBlob(data?.contentUrl ?? null);
+
+  // ── Zoom controls ──────────────────────────────────────────────────────
+  const [zoomMode, setZoomMode] = useState<ZoomMode>("fit");
+  const [zoomLevel, setZoomLevel] = useState(100); // percentage, only for "custom"
+  const ZOOM_STEP = 25;
+  const ZOOM_MIN = 25;
+  const ZOOM_MAX = 400;
+
+  function zoomIn() {
+    setZoomMode("custom");
+    setZoomLevel((z) => Math.min(ZOOM_MAX, z + ZOOM_STEP));
+  }
+
+  function zoomOut() {
+    setZoomMode("custom");
+    setZoomLevel((z) => Math.max(ZOOM_MIN, z - ZOOM_STEP));
+  }
+
+  function fitScreen() {
+    setZoomMode("fit");
+    setZoomLevel(100);
+  }
+
+  function originalSize() {
+    setZoomMode("original");
+    setZoomLevel(100);
+  }
+
+  // Reset zoom when changing files
+  useEffect(() => {
+    setZoomMode("fit");
+    setZoomLevel(100);
+  }, [id]);
 
   // ── Folder context: siblings for prev/next & breadcrumb ──────────────────
   const [folderData, setFolderData] = useState<ListFilesResponse | null>(null);
@@ -60,7 +99,6 @@ function PreviewInner() {
     return () => { alive = false; };
   }, [folderId]);
 
-  /** All non-folder files in the current folder, sorted by name (same as drive default). */
   const siblings = useMemo<DriveFile[]>(() => {
     if (!folderData) return [];
     return [...folderData.files].sort((a, b) =>
@@ -72,9 +110,6 @@ function PreviewInner() {
   const prevItem = currentIndex > 0 ? siblings[currentIndex - 1] : null;
   const nextItem = currentIndex >= 0 && currentIndex < siblings.length - 1 ? siblings[currentIndex + 1] : null;
 
-  // ── Navigation helpers ──────────────────────────────────────────────────
-
-  /** Navigate to another file in the same folder. */
   const navigateToSibling = useCallback((fileId: string) => {
     setData(null);
     setError(null);
@@ -82,18 +117,13 @@ function PreviewInner() {
     router.push(`/preview?id=${encodeURIComponent(fileId)}${folderParam}`);
   }, [folderId, router]);
 
-  /** Go back to the drive page, preserving the folder context. */
   const goBackToDrive = useCallback(() => {
     router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
   }, [folderId, router]);
 
-  // ── Auth guard ──────────────────────────────────────────────────────────
-
   useEffect(() => {
     if (!loading && !workspace) router.replace("/");
   }, [loading, workspace, router]);
-
-  // ── Fetch preview data when id changes ──────────────────────────────────
 
   useEffect(() => {
     if (!id) return;
@@ -102,10 +132,7 @@ function PreviewInner() {
     api.preview(id).then(setData).catch((err) => setError(err instanceof Error ? err.message : "Failed to load file."));
   }, [id]);
 
-  // ── Keyboard shortcuts ──────────────────────────────────────────────────
-
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Don't capture when typing in an input
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
     if (e.key === "ArrowLeft" && prevItem) {
@@ -117,6 +144,15 @@ function PreviewInner() {
     } else if (e.key === "Escape") {
       e.preventDefault();
       goBackToDrive();
+    } else if (e.key === "+" || e.key === "=") {
+      e.preventDefault();
+      zoomIn();
+    } else if (e.key === "-") {
+      e.preventDefault();
+      zoomOut();
+    } else if (e.key === "0") {
+      e.preventDefault();
+      fitScreen();
     }
   }, [prevItem, nextItem, navigateToSibling, goBackToDrive]);
 
@@ -124,8 +160,6 @@ function PreviewInner() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
-
-  // ── Empty state ─────────────────────────────────────────────────────────
 
   if (!id) {
     return (
@@ -154,15 +188,24 @@ function PreviewInner() {
     isText(data?.mimeType ?? "")
   );
 
-  // Build breadcrumb from folder data + current file name
+  const isZoomable = isImage(data?.mimeType ?? "") || isPdf(data?.mimeType ?? "");
   const breadcrumb = folderData?.breadcrumb ?? [];
+
+  // Compute image style based on zoom mode
+  const imageStyle = useMemo(() => {
+    if (zoomMode === "fit") {
+      return { maxWidth: "100%", maxHeight: "80vh" };
+    } else if (zoomMode === "original") {
+      return {};
+    } else {
+      return { width: `${zoomLevel}%`, maxWidth: "none" };
+    }
+  }, [zoomMode, zoomLevel]);
 
   return (
     <main className="min-h-screen bg-slate-50">
-      {/* Header */}
       <header className="sticky top-0 z-20 bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
-          {/* Breadcrumb: Home > Folder > … > Filename */}
           <div className="flex items-center gap-1 min-w-0 flex-1 overflow-x-auto">
             <button
               onClick={goBackToDrive}
@@ -182,7 +225,6 @@ function PreviewInner() {
                 </button>
               </span>
             ))}
-            {/* Current file name in breadcrumb */}
             <span className="flex items-center gap-1 min-w-0 shrink-0">
               <ChevronRight className="h-3.5 w-3.5 text-slate-300 shrink-0" />
               <span className="text-sm text-slate-900 font-medium truncate max-w-[12rem]">
@@ -191,14 +233,51 @@ function PreviewInner() {
             </span>
           </div>
 
-          {/* File metadata */}
           {data && (
             <span className="text-xs text-slate-400 shrink-0 hidden md:inline">
               {data.mimeType} · {formatSize(data.size)}
             </span>
           )}
 
-          {/* Actions */}
+          {/* Zoom controls */}
+          {isZoomable && (
+            <div className="flex items-center gap-1 shrink-0 bg-slate-100 rounded-lg p-0.5">
+              <button
+                onClick={zoomOut}
+                disabled={zoomMode === "custom" && zoomLevel <= ZOOM_MIN}
+                className="rounded-md p-1.5 text-slate-500 hover:text-slate-700 hover:bg-white transition-all disabled:opacity-30"
+                title="Zoom out"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={fitScreen}
+                className={`rounded-md p-1.5 text-xs font-medium transition-all ${zoomMode === "fit" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                title="Fit screen"
+              >
+                <Maximize className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={originalSize}
+                className={`rounded-md p-1.5 text-xs font-medium transition-all ${zoomMode === "original" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                title="Original size"
+              >
+                <Minimize className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={zoomIn}
+                disabled={zoomMode === "custom" && zoomLevel >= ZOOM_MAX}
+                className="rounded-md p-1.5 text-slate-500 hover:text-slate-700 hover:bg-white transition-all disabled:opacity-30"
+                title="Zoom in"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </button>
+              <span className="text-[10px] text-slate-400 tabular-nums min-w-[3rem] text-center">
+                {zoomMode === "custom" ? `${zoomLevel}%` : zoomMode === "fit" ? "Fit" : "1:1"}
+              </span>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 shrink-0">
             {contentUrl && data && (
               <a
@@ -230,7 +309,6 @@ function PreviewInner() {
         {contentError && <ErrorBanner message={`Content failed to load: ${contentError}`} />}
         {folderError && <ErrorBanner message={folderError} />}
 
-        {/* Trash warning */}
         {data?.trashed && (
           <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 mb-4">
             <AlertCircle className="h-4 w-4 shrink-0" />
@@ -238,7 +316,6 @@ function PreviewInner() {
           </div>
         )}
 
-        {/* Skeleton while loading metadata */}
         {!data && !error && (
           <Card className="p-6 space-y-4">
             <div className="flex items-center gap-3">
@@ -254,9 +331,7 @@ function PreviewInner() {
 
         {data && (
           <Card className="overflow-hidden relative">
-            {/* Content area */}
-            <div className="p-6">
-              {/* Loading blob */}
+            <div className={`p-6 ${zoomMode !== "fit" ? "overflow-auto" : ""}`}>
               {contentLoading && hasContent && (
                 <div className="flex items-center justify-center h-64 text-slate-400 gap-2">
                   <Loader2 className="h-5 w-5 animate-spin text-brand-400" />
@@ -265,12 +340,15 @@ function PreviewInner() {
               )}
 
               {isImage(data.mimeType) && contentUrl && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={contentUrl}
-                  alt={data.name}
-                  className="max-w-full rounded-2xl mx-auto shadow-sm"
-                />
+                <div className="flex justify-center">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={contentUrl}
+                    alt={data.name}
+                    className="rounded-2xl mx-auto shadow-sm transition-all duration-200"
+                    style={imageStyle}
+                  />
+                </div>
               )}
               {isVideo(data.mimeType) && contentUrl && (
                 <video
@@ -292,6 +370,7 @@ function PreviewInner() {
                   src={contentUrl}
                   title={data.name}
                   className="w-full h-[75vh] rounded-2xl border border-slate-100"
+                  style={zoomMode === "custom" ? { zoom: zoomLevel / 100 } : undefined}
                 />
               )}
               {isText(data.mimeType) && contentUrl && (
@@ -312,7 +391,6 @@ function PreviewInner() {
               )}
             </div>
 
-            {/* Prev / Next navigation overlay */}
             {(prevItem || nextItem) && (
               <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/50">
                 <button
@@ -341,7 +419,6 @@ function PreviewInner() {
           </Card>
         )}
 
-        {/* Error screen */}
         {error && !data && (
           <Card className="p-10 text-center">
             <div className="rounded-2xl bg-red-50 p-5 inline-flex mb-4">
@@ -363,16 +440,6 @@ function PreviewInner() {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function PreviewFileIcon({ mime }: { mime: string }) {
-  const cls = "h-5 w-5 shrink-0";
-  if (mime.startsWith("image/")) return <ImageIcon className={`${cls} text-violet-400`} />;
-  if (mime.startsWith("video/")) return <Video className={`${cls} text-red-400`} />;
-  if (mime.startsWith("audio/")) return <Music className={`${cls} text-emerald-400`} />;
-  if (mime === "application/pdf") return <FileText className={`${cls} text-red-400`} />;
-  if (mime.startsWith("text/")) return <FileText className={`${cls} text-slate-400`} />;
-  return <File className={`${cls} text-slate-400`} />;
-}
 
 function useAuthedBlob(url: string | null): { blobUrl: string | null; error: string | null; loading: boolean } {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
