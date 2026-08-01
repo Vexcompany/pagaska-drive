@@ -8,7 +8,7 @@ import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
 import { downloadSelected } from "@/lib/download";
 import { formatSize, formatDate, typeLabel } from "@/lib/format";
 import { addFilesToPanel } from "@/hooks/useUploadPanel";
-import { setFolderCover, removeCoverByImage, getFolderCover } from "@/stores/useFolderCoverStore";
+import { setFolderCover, removeCoverByImage, getFolderCover, useFolderCoverVersion } from "@/stores/useFolderCoverStore";
 import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
 import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
 import { PropertiesPanel } from "@/components/PropertiesPanel";
@@ -147,6 +147,9 @@ function DriveInner() {
 
   // Upload drag state
   const [dragOver, setDragOver] = useState(false);
+
+  // Re-render when folder cover store changes
+  useFolderCoverVersion();
 
   // ── Undo toast for "Move to Trash" ──────────────────────────────────────
   const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[] }>({
@@ -520,9 +523,9 @@ function DriveInner() {
     { label: "Download", icon: <Download className="h-4 w-4" />, onClick: () => void downloadSelected([ctxMenu.item]) },
     { label: "Properties", icon: <Info className="h-4 w-4" />, onClick: () => setPropsItem(ctxMenu.item) },
     // Set as Folder Cover — only for images
-    ...(ctxMenu.item.mimeType.startsWith("image/") && folderId ? [{
+    ...(ctxMenu.item.mimeType.startsWith("image/") && ctxMenu.item.thumbnailLink && folderId ? [{
       label: "Set as Folder Cover", icon: <ImagePlus className="h-4 w-4" />, onClick: () => {
-        setFolderCover(folderId, ctxMenu.item.id);
+        setFolderCover(folderId, ctxMenu.item.id, ctxMenu.item.thumbnailLink!);
       }
     }] : []),
     { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteOne(ctxMenu.item.id), danger: true },
@@ -595,6 +598,19 @@ function DriveInner() {
               <Upload className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Upload</span>
               <input type="file" multiple className="hidden" onChange={onFileInput} />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all cursor-pointer" title="Upload folder">
+              <FolderPlus className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Folder</span>
+              <input
+                type="file"
+                multiple
+                // @ts-expect-error — non-standard but supported by all evergreen browsers
+                webkitdirectory=""
+                directory=""
+                className="hidden"
+                onChange={onFileInput}
+              />
             </label>
             <Link href="/profile" className="inline-flex items-center gap-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all">
               <User className="h-3.5 w-3.5" />
