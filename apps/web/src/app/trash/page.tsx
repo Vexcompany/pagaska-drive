@@ -316,7 +316,7 @@ function TrashInner() {
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <Link href="/upload" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
+            <Link href="/drive" className="inline-flex items-center gap-1.5 bg-brand-500 text-white hover:bg-brand-600 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all shadow-sm">
               <House className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Drive</span>
             </Link>
