@@ -4,7 +4,6 @@
  * FolderCoverImage — renders a folder's cover image if one is set.
  * Uses the cached thumbnail URL from the cover store so it works
  * even when the subfolder's file listing is not loaded.
- *
  * Uses useFolderCoverVersion to re-render when the cover store changes.
  */
 
