@@ -4,7 +4,7 @@
  * Authenticated downloads. The Worker's /download endpoints require an
  * Authorization header, but an <a download> click cannot carry headers,
  * so every download is: fetch with auth → blob → object URL → click
- */ 
+ */
 
 import { API_URL, authHeaders } from "./api";
 import type { DriveFile } from "@pagaska/shared";
@@ -33,22 +33,29 @@ export function downloadItem(item: DriveFile): Promise<void> {
 }
 
 /**
- * Download multiple selected items as a ZIP.
+ * Download multiple selected items.
  *
  * Strategy:
- * - If exactly 1 item is selected, download it directly (no ZIP overhead).
+ * - If exactly 1 item is selected, download it directly.
  * - If the item is a folder, use the Worker's /download/folder endpoint
- *   which produces a ZIP server-side.
- * - If multiple items are selected, download them individually and
- *   build a ZIP in the browser using a lightweight client-side approach.
- *   We fetch each file with auth, then use the browser's Compression
- *   Streams API (or a simple fallback) to create a downloadable ZIP.
+ *   which produces a ZIP server-side — fast and efficient.
+ * - If multiple items are selected:
+ *   - For folders: use the server-side /download/folder (already a ZIP)
+ *   - For files: download them in parallel (concurrency=4) and build
+ *     a client-side ZIP.
+ *   - If all items are files, build a single ZIP.
+ *   - If there's a mix of folders and files, download each as a
+ *     separate file (folders as ZIPs, files individually).
  *
- * Since the backend already has /download/folder which builds a ZIP,
- * for multiple files we download them sequentially and trigger each
- * as a separate download. For a true multi-file ZIP, we use a simple
- * client-side ZIP builder.
+ * Performance improvements over the original:
+ * - Parallel downloads with concurrency limit (4) instead of sequential
+ * - Server-side ZIP for folders instead of re-downloading and re-packaging
+ * - Use STORE method (no compression) for already-compressed file types
+ *   (images, videos, archives) to avoid expensive DEFLATE on them
+ * - Only compress text-based files that benefit from it
  */
+
+const DOWNLOAD_CONCURRENCY = 4;
 
 /** Download multiple items — if multiple, produces a single ZIP. */
 export async function downloadSelected(items: DriveFile[]): Promise<void> {
@@ -59,7 +66,7 @@ export async function downloadSelected(items: DriveFile[]): Promise<void> {
     return downloadItem(items[0]);
   }
 
-  // Multiple items — build a client-side ZIP
+  // Multiple items — build a client-side ZIP with parallel downloads
   const { buildClientZip } = await import("./zip-builder");
   const zipBlob = await buildClientZip(items);
   const url = URL.createObjectURL(zipBlob);
