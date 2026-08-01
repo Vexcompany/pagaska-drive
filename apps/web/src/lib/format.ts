@@ -1,6 +1,6 @@
 /**
  * Shared formatting utilities used across the app.
- * Extracted to avoid duplicating formatSize/formatDate in every page.
+ * Extracted to avoid duplicating formatSize/formatDate in every page. 
  */
 
 export function formatSize(bytes: string | number | null | undefined): string {
