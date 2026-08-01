@@ -1,47 +1,46 @@
 "use client";
 
 /**
- * FolderCoverImage — renders a folder's cover image if one is set,
- * or falls back to the first image in the folder. If no images exist,
- * shows nothing (the parent component renders the folder icon)
+ * FolderCoverImage — renders a folder's cover image if one is set.
+ * Uses the cached thumbnail URL from the cover store so it works
+ * even when the subfolder's file listing is not loaded.
+ *
+ * Uses useFolderCoverVersion to re-render when the cover store changes.
  */
 
 import { useMemo } from "react";
 import type { DriveFile } from "@pagaska/shared";
-import { getFolderCover } from "@/stores/useFolderCoverStore";
+import { getFolderCover, useFolderCoverVersion } from "@/stores/useFolderCoverStore";
 
 interface FolderCoverImageProps {
   folder: DriveFile;
-  /** All files in the folder (used to find the first image). */
+  /** All files in the folder (used to find the first image as fallback). */
   files: DriveFile[];
   className?: string;
 }
 
 export function FolderCoverImage({ folder, files, className = "" }: FolderCoverImageProps) {
-  const coverImageId = useMemo(() => {
-    // Check if user explicitly set a cover
+  // Subscribe to cover store changes so we re-render when a cover is set
+  useFolderCoverVersion();
+
+  const coverUrl = useMemo(() => {
+    // Check if user explicitly set a cover (has cached thumbnail URL)
     const explicitCover = getFolderCover(folder.id);
-    if (explicitCover) {
-      const exists = files.find((f) => f.id === explicitCover);
-      if (exists) return explicitCover;
-    }
+    if (explicitCover?.thumbnailUrl) return explicitCover.thumbnailUrl;
+
     // Fall back to first image in the folder
     const firstImage = files.find((f) =>
       f.mimeType.startsWith("image/") && f.thumbnailLink
     );
-    return firstImage?.thumbnailLink ? firstImage.id : null;
+    return firstImage?.thumbnailLink ?? null;
   }, [folder.id, files]);
 
-  if (!coverImageId) return null;
-
-  // Find the image file to get its thumbnail
-  const imageFile = files.find((f) => f.id === coverImageId);
-  if (!imageFile?.thumbnailLink) return null;
+  if (!coverUrl) return null;
 
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={imageFile.thumbnailLink}
+      src={coverUrl}
       alt={folder.name}
       className={`object-cover rounded-xl ${className}`}
       loading="lazy"
@@ -51,17 +50,21 @@ export function FolderCoverImage({ folder, files, className = "" }: FolderCoverI
 
 /**
  * Returns the thumbnail URL for a folder's cover image, or null.
- * Useful for grid view where we need the URL directly.
+ * Uses the cached thumbnail URL from the cover store, so it works
+ * without needing the subfolder's file listing.
+ *
+ * IMPORTANT: The caller MUST subscribe to `useFolderCoverVersion()`
+ * so that the component re-renders when the cover store changes.
  */
 export function getFolderCoverUrl(
   folderId: string,
   files: DriveFile[]
 ): string | null {
+  // Check if user explicitly set a cover (has cached thumbnail URL)
   const explicitCover = getFolderCover(folderId);
-  if (explicitCover) {
-    const exists = files.find((f) => f.id === explicitCover);
-    if (exists?.thumbnailLink) return exists.thumbnailLink;
-  }
+  if (explicitCover?.thumbnailUrl) return explicitCover.thumbnailUrl;
+
+  // Fall back to first image in the current listing
   const firstImage = files.find((f) =>
     f.mimeType.startsWith("image/") && f.thumbnailLink
   );
