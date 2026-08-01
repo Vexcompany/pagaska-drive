@@ -9,6 +9,7 @@ import { downloadSelected } from "@/lib/download";
 import { formatSize, formatDate, typeLabel } from "@/lib/format";
 import { addFilesToPanel, useUploadCompletionVersion } from "@/hooks/useUploadPanel";
 import { setFolderCover, removeCoverByImage, getFolderCover, useFolderCoverVersion } from "@/stores/useFolderCoverStore";
+import { showToast } from "@/stores/useToastStore";
 import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
 import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
 import { PropertiesPanel } from "@/components/PropertiesPanel";
@@ -152,28 +153,32 @@ function DriveInner() {
   useFolderCoverVersion();
 
   // ── Undo toast for "Move to Trash" ──────────────────────────────────────
-  const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[] }>({
+  const [toast, setToast] = useState<{ visible: boolean; message: string; undoIds: string[]; restoring: boolean }>({
     visible: false,
     message: "",
     undoIds: [],
+    restoring: false,
   });
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showTrashToast(ids: string[], count: number) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ visible: true, message: `${count} item${count > 1 ? "s" : ""} moved to Trash`, undoIds: ids });
+    setToast({ visible: true, message: `${count} item${count > 1 ? "s" : ""} moved to Trash`, undoIds: ids, restoring: false });
     toastTimer.current = setTimeout(() => setToast((t) => ({ ...t, visible: false })), 6000);
   }
 
   async function undoTrash() {
     const ids = toast.undoIds;
-    if (ids.length === 0) return;
+    if (ids.length === 0 || toast.restoring) return;
+    setToast((t) => ({ ...t, restoring: true }));
     try {
       await api.restoreItems({ fileIds: ids });
-      setToast({ visible: false, message: "", undoIds: [] });
+      setToast({ visible: false, message: "", undoIds: [], restoring: false });
+      showToast("Restored successfully");
       void refresh(folderId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Undo failed.");
+      setToast((t) => ({ ...t, restoring: false }));
+      showToast("Restore failed", { type: "error" });
     }
   }
 
@@ -316,6 +321,7 @@ function DriveInner() {
       await api.createFolder({ name: newFolderName.trim(), parentId: folderId });
       setNewFolderName("");
       setShowNewFolder(false);
+      showToast("Folder created");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create folder.");
@@ -370,6 +376,7 @@ function DriveInner() {
       await api.rename({ fileId: renaming.id, name: renameValue.trim() });
       setRenaming(null);
       setRenameValue("");
+      showToast("Renamed successfully");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rename failed.");
@@ -462,6 +469,7 @@ function DriveInner() {
     try {
       const { webViewLink } = await api.share(shareItem.id);
       setShareStatus({ public: true, role: "reader", webViewLink });
+      showToast("Share link created");
     } catch (err) {
       setShareStatus((prev: ShareStatusResponse | null) => ({ ...(prev ?? { public: false, role: null, webViewLink: null }), public: false }));
       setError(err instanceof Error ? err.message : "Share failed.");
@@ -475,6 +483,7 @@ function DriveInner() {
     try {
       await navigator.clipboard.writeText(shareStatus.webViewLink);
       setShareCopied(true);
+      showToast("Link copied");
       window.setTimeout(() => setShareCopied(false), 2000);
     } catch {
       window.prompt("Copy this link:", shareStatus.webViewLink);
@@ -536,6 +545,7 @@ function DriveInner() {
       await api.move({ fileIds: moveTargets, parentId: moveFolderId });
       setMoveOpen(false);
       setSelected(new Set());
+      showToast("Moved successfully");
       void refresh(folderId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Move failed.");
@@ -568,6 +578,7 @@ function DriveInner() {
     ...(ctxMenu.item.mimeType.startsWith("image/") && ctxMenu.item.thumbnailLink && folderId ? [{
       label: "Set as Folder Cover", icon: <ImagePlus className="h-4 w-4" />, onClick: () => {
         setFolderCover(folderId, ctxMenu.item.id, ctxMenu.item.thumbnailLink!);
+        showToast("Folder cover updated");
       }
     }] : []),
     { label: "Move to Trash", icon: <Trash2 className="h-4 w-4" />, onClick: () => void deleteOne(ctxMenu.item.id), danger: true },
@@ -929,7 +940,7 @@ function DriveInner() {
                 const isFolder = item.mimeType === "application/vnd.google-apps.folder";
                 const isSel = selected.has(item.id);
                 // Folder cover image
-                const coverUrl = isFolder && data ? getFolderCoverUrl(item.id, data.files) : null;
+                const coverUrl = isFolder ? getFolderCoverUrl(item.id) : null;
                 return (
                   <div
                     key={item.id}
@@ -1159,9 +1170,9 @@ function DriveInner() {
       {/* Undo toast for "Move to Trash" */}
       <Toast
         visible={toast.visible}
-        message={toast.message}
-        action={{ label: "UNDO", onClick: undoTrash }}
-        onDismiss={() => setToast((t) => ({ ...t, visible: false }))}
+        message={toast.restoring ? "Restoring…" : toast.message}
+        action={toast.restoring ? undefined : { label: "UNDO", onClick: undoTrash }}
+        onDismiss={() => { if (!toast.restoring) setToast((t) => ({ ...t, visible: false })); }}
       />
     </main>
   );
