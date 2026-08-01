@@ -1,6 +1,6 @@
 "use client";
 
-/**
+/** 
  * FolderStatsDisplay — renders file count, folder count, and total size
  * for a folder. E.g. "184 Files · 12 Folders · 2.8 GB"
  */
