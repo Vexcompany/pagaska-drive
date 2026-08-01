@@ -20,6 +20,9 @@ import { useAuth } from "@/lib/auth-context";
 import { addFilesToPanel, useUploadPanel } from "@/hooks/useUploadPanel";
 import { Button, Card, StatusBadge, ProgressBar, ErrorBanner } from "@/components/ui";
 import { formatSize, formatSpeed, formatRemaining } from "@/lib/format";
+import { DuplicateDialog, type DuplicateAction } from "@/components/DuplicateDialog";
+import { api } from "@/lib/api";
+import type { ListFilesResponse } from "@pagaska/shared";
 
 /**
  * Upload page — acts as an upload launcher.
@@ -55,6 +58,14 @@ function UploadInner() {
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Duplicate detection state
+  const [dupDialog, setDupDialog] = useState<{
+    open: boolean;
+    count: number;
+    firstName: string;
+    pendingFiles: File[];
+  }>({ open: false, count: 0, firstName: "", pendingFiles: [] });
+
   // Read from the shared upload panel state
   const panel = useUploadPanel();
   const { snapshot, files } = panel;
@@ -63,14 +74,95 @@ function UploadInner() {
     if (!loading && !workspace) router.replace("/");
   }, [loading, workspace, router]);
 
-  const handleFiles = useCallback((rawFiles: File[]) => {
+  const handleFiles = useCallback(async (rawFiles: File[]) => {
     if (rawFiles.length === 0) return;
     setError(null);
+
+    // Check for duplicate filenames in the target folder
+    try {
+      const listing: ListFilesResponse = await api.listFiles(folderId);
+      const existingNames = new Set(
+        [...listing.files, ...listing.folders].map((f) => f.name.toLowerCase())
+      );
+      const duplicates = rawFiles.filter((f) => existingNames.has(f.name.toLowerCase()));
+      if (duplicates.length > 0) {
+        setDupDialog({
+          open: true,
+          count: duplicates.length,
+          firstName: duplicates[0].name,
+          pendingFiles: rawFiles,
+        });
+        return;
+      }
+    } catch {
+      // If listing fails, proceed without duplicate check
+    }
+
     addFilesToPanel(rawFiles, folderId);
-    // Navigate back to drive so the user sees the upload panel
-    // and the directory auto-refreshes on completion.
     router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
   }, [folderId, router]);
+
+  function handleDuplicateChoice(action: DuplicateAction) {
+    const { pendingFiles } = dupDialog;
+    setDupDialog({ open: false, count: 0, firstName: "", pendingFiles: [] });
+
+    if (action === "skip") {
+      // Re-check which files are duplicates (we need the listing again)
+      // For simplicity, just skip by only uploading non-duplicate files.
+      // We'll re-fetch the listing to identify them.
+      api.listFiles(folderId).then((listing) => {
+        const existingNames = new Set(
+          [...listing.files, ...listing.folders].map((f) => f.name.toLowerCase())
+        );
+        const nonDuplicates = pendingFiles.filter((f) => !existingNames.has(f.name.toLowerCase()));
+        if (nonDuplicates.length > 0) {
+          addFilesToPanel(nonDuplicates, folderId);
+          router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+        }
+      }).catch(() => {
+        // If listing fails, just upload everything
+        addFilesToPanel(pendingFiles, folderId);
+        router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+      });
+      return;
+    }
+
+    if (action === "replace") {
+      // Upload all files — the upload engine will overwrite existing files
+      // because Google Drive creates a new revision for the same name.
+      addFilesToPanel(pendingFiles, folderId);
+      router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+      return;
+    }
+
+    // "keep" — rename duplicates by appending a number
+    api.listFiles(folderId).then((listing) => {
+      const existingNames = new Set(
+        [...listing.files, ...listing.folders].map((f) => f.name.toLowerCase())
+      );
+      const renamed = pendingFiles.map((f) => {
+        if (!existingNames.has(f.name.toLowerCase())) return f;
+        // Find a unique name
+        const dotIdx = f.name.lastIndexOf(".");
+        const base = dotIdx > 0 ? f.name.substring(0, dotIdx) : f.name;
+        const ext = dotIdx > 0 ? f.name.substring(dotIdx) : "";
+        let n = 1;
+        let newName: string;
+        do {
+          newName = `${base} (${n})${ext}`;
+          n++;
+        } while (existingNames.has(newName.toLowerCase()));
+        existingNames.add(newName.toLowerCase());
+        // Create a new File with the renamed name
+        return new File([f], newName, { type: f.type, lastModified: f.lastModified });
+      });
+      addFilesToPanel(renamed, folderId);
+      router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+    }).catch(() => {
+      addFilesToPanel(pendingFiles, folderId);
+      router.push(folderId ? `/drive?folderId=${encodeURIComponent(folderId)}` : "/drive");
+    });
+  }
 
   function onFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const list = e.target.files;
@@ -334,6 +426,15 @@ function UploadInner() {
           </Card>
         )}
       </div>
+
+      {/* Duplicate file dialog */}
+      <DuplicateDialog
+        open={dupDialog.open}
+        count={dupDialog.count}
+        firstName={dupDialog.firstName}
+        onChoose={handleDuplicateChoice}
+        onCancel={() => setDupDialog({ open: false, count: 0, firstName: "", pendingFiles: [] })}
+      />
     </main>
   );
 }
