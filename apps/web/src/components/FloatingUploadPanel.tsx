@@ -4,9 +4,11 @@
  * Floating upload panel — appears at the bottom-right of the screen
  * when uploads are active. Can be minimized to a small pill or
  * expanded to show per-file progress.
+ *
  * Uploads continue while the user browses the drive.
  */
 
+import { useEffect } from "react";
 import {
   Pause,
   Play,
@@ -36,6 +38,16 @@ import { formatSize, formatSpeed, formatRemaining } from "@/lib/format";
 
 export function FloatingUploadPanel() {
   const panel = useUploadPanel();
+
+  // Auto-minimize the panel 5 seconds after all uploads complete.
+  // The user can still expand it to review per-file results.
+  useEffect(() => {
+    if (panel.allDone && !panel.minimized) {
+      const timer = setTimeout(() => setPanelMinimized(true), 5000);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [panel.allDone, panel.minimized]);
 
   if (!panel.visible) return null;
 
