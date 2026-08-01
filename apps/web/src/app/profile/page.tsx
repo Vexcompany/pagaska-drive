@@ -9,7 +9,7 @@ import { ArrowLeft, Check, LogOut, HardDrive } from "lucide-react";
 import Link from "next/link";
 
 export default function WorkspaceSwitcherPage() {
-  const { workspace, loading, login, logout } = useAuth();
+  const { workspace, loading, switchWorkspace, logout } = useAuth();
   const router = useRouter();
   const [knownWorkspaces, setKnownWorkspaces] = useState<readonly Workspace[]>(WORKSPACES);
   const [fetching, setFetching] = useState(true);
@@ -63,7 +63,10 @@ export default function WorkspaceSwitcherPage() {
               return (
                 <button
                   key={w}
-                  onClick={() => router.push("/")}
+                  onClick={() => {
+                    if (isCurrent) return;
+                    switchWorkspace(w);
+                  }}
                   className={`relative rounded-2xl border p-4 text-left transition-all duration-150 ${
                     isCurrent
                       ? "border-brand-300 bg-brand-50 ring-1 ring-brand-200"
@@ -100,4 +103,3 @@ export default function WorkspaceSwitcherPage() {
     </main>
   );
 }
-
