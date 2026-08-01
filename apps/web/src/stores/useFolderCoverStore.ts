@@ -5,7 +5,7 @@
  * cover thumbnail. Uses localStorage so it survives page reloads.
  *
  * Stores both the image file ID and its thumbnail URL so the
- * cover can be rendered without needing the subfolder's file listing. 
+ * cover can be rendered without needing the subfolder's file listing.
  *
  * IMPORTANT: The store uses a version counter to force React
  * re-renders when the cover map changes. Components that read
