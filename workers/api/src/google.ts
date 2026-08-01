@@ -457,3 +457,36 @@ export async function forwardChunk(
   }
   throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
 }
+
+/** Get Drive storage usage (about endpoint). */
+export interface StorageInfo {
+  /** Total storage limit in bytes. */
+  limit: number;
+  /** Total bytes used across all Drive. */
+  usage: number;
+  /** Bytes used in the workspace (traversed). */
+  workspaceUsage: number;
+}
+
+export async function getStorageInfo(env: Parameters<typeof getAccessToken>[0]): Promise<StorageInfo> {
+  const res = await authedFetch(
+    `${DRIVE_API}/about?fields=storageQuota`,
+    { method: "GET" },
+    env,
+  );
+  if (!res.ok) throw new HttpError(res.status, "DRIVE_ERROR", await res.text());
+  const data = (await res.json()) as {
+    storageQuota?: {
+      limit?: string;
+      usage?: string;
+      usageInDrive?: string;
+      usageInDriveTrash?: string;
+    };
+  };
+  const q = data.storageQuota ?? {};
+  return {
+    limit: Number(q.limit) || 0,
+    usage: Number(q.usage) || 0,
+    workspaceUsage: Number(q.usageInDrive) || Number(q.usage) || 0,
+  };
+}
