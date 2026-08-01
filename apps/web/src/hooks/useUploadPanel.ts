@@ -2,7 +2,7 @@
 
 /**
  * Upload panel hook — manages the floating upload panel state.
- * The panel persists across page navigation so uploads continue
+ * The panel persists across page navigation so uploads continue 
  * while the user browses. The state is stored in a module-level
  * singleton so it survives React re-renders and route changes.
  */
