@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Workspace } from "@pagaska/shared";
 import { AuthContext, type AuthState } from "./auth-context";
 import { api, TOKEN_KEY, WORKSPACE_KEY } from "./api";
+import { FloatingUploadPanel } from "@/components/FloatingUploadPanel";
 
 /**
  * Storage keys are versioned. The previous version used
@@ -72,5 +73,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [workspace, token, loading, login, logout]
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      {/* Floating upload panel — persists across all pages */}
+      <FloatingUploadPanel />
+    </AuthContext.Provider>
+  );
 }
