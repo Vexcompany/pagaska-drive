@@ -7,7 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 import { api, batchOperation, MAX_BATCH, type BatchProgress } from "@/lib/api";
 import { downloadSelected } from "@/lib/download";
 import { formatSize, formatDate, typeLabel } from "@/lib/format";
-import { addFilesToPanel } from "@/hooks/useUploadPanel";
+import { addFilesToPanel, useUploadCompletionVersion } from "@/hooks/useUploadPanel";
 import { setFolderCover, removeCoverByImage, getFolderCover, useFolderCoverVersion } from "@/stores/useFolderCoverStore";
 import { FolderCoverImage, getFolderCoverUrl } from "@/components/FolderCoverImage";
 import { FolderStatsDisplay } from "@/components/FolderStatsDisplay";
@@ -207,6 +207,19 @@ function DriveInner() {
     }
   }, []);
 
+  // Silent refresh — used when uploads complete.  Re-fetches the file
+  // listing without showing a loading skeleton so the current scroll
+  // position and selection are preserved.
+  const silentRefresh = useCallback(async (id: string | null) => {
+    try {
+      const next = await api.listFiles(id);
+      setData(next);
+    } catch {
+      // Don't surface errors for background refresh — the current data
+      // is still valid and the user can always manually refresh.
+    }
+  }, []);
+
   useEffect(() => {
     if (!loading && !workspace) router.replace("/");
   }, [loading, workspace, router]);
@@ -214,6 +227,35 @@ function DriveInner() {
   useEffect(() => {
     if (workspace) void refresh(folderId);
   }, [workspace, folderId, refresh]);
+
+  // ── Auto-refresh when uploads complete ─────────────────────────────────
+  // Watches the completion version for the current folder.  When uploads
+  // finish, silently re-fetches the directory listing so new files appear
+  // without a full page reload.  Scroll position and selection are
+  // preserved because we don't show a loading skeleton.
+  const uploadCompletionVersion = useUploadCompletionVersion(folderId);
+  const prevUploadVersion = useRef(uploadCompletionVersion);
+  const prevUploadFolderId = useRef(folderId);
+
+  useEffect(() => {
+    // If the user navigated to a different folder, just sync the refs
+    // without triggering a refresh.
+    if (folderId !== prevUploadFolderId.current) {
+      prevUploadFolderId.current = folderId;
+      prevUploadVersion.current = uploadCompletionVersion;
+      return;
+    }
+
+    // Version increased ⇒ uploads completed for the current folder.
+    if (uploadCompletionVersion > 0 && uploadCompletionVersion > prevUploadVersion.current) {
+      prevUploadVersion.current = uploadCompletionVersion;
+      // Save scroll position, refresh, then restore.
+      const scrollY = window.scrollY;
+      void silentRefresh(folderId).then(() => {
+        window.scrollTo(0, scrollY);
+      });
+    }
+  }, [uploadCompletionVersion, folderId, silentRefresh]);
 
   useEffect(() => {
     try {
