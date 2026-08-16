@@ -12,7 +12,10 @@ export interface JwtPayload {
   sub: string; // workspace id
   workspace: Workspace;
   iat: number;
-  exp: number;
+  /** Expiry, seconds since epoch. Absent on non-expiring tokens issued
+   *  after the "stay signed in" change. When present it is still
+   *  validated so older (legacy) tokens remain compatible. */
+  exp?: number;
 }
 
 const encoder = new TextEncoder();
@@ -42,9 +45,20 @@ async function importKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-export async function signJwt(payload: Omit<JwtPayload, "iat" | "exp">, ttlSeconds: number, secret: string): Promise<string> {
+export async function signJwt(
+  payload: Omit<JwtPayload, "iat" | "exp">,
+  secret: string,
+  ttlSeconds?: number
+): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  const full: JwtPayload = { ...payload, iat: now, exp: now + ttlSeconds };
+  const full: JwtPayload = { ...payload, iat: now };
+  // `ttlSeconds` is optional: omit it to mint a non-expiring session
+  // (no `exp` claim). A finite value — including a negative one, which
+  // callers/tests use to simulate an already-expired token — still
+  // produces an `exp` claim.
+  if (typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds)) {
+    full.exp = now + ttlSeconds;
+  }
   const header = { alg: "HS256", typ: "JWT" };
   const headerB64 = b64urlEncode(encoder.encode(JSON.stringify(header)));
   const payloadB64 = b64urlEncode(encoder.encode(JSON.stringify(full)));
@@ -65,7 +79,9 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
   if (!ok) return null;
   try {
     const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64))) as JwtPayload;
-    if (payload.exp * 1000 < Date.now()) return null;
+    // Validate expiry only when an `exp` claim is present (legacy tokens).
+    // Tokens minted without `exp` are treated as non-expiring.
+    if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) return null;
     return payload;
   } catch {
     return null;

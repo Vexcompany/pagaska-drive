@@ -146,8 +146,10 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       if (!expected) return err("CONFIG_ERROR", `No password configured for workspace "${workspace}".`, 500, origin);
       const ok = await constantTimeEqual(body.password, expected);
       if (!ok) return err("INVALID_CREDENTIALS", "Wrong password for the selected workspace.", 401, origin);
-      const token = await signJwt({ sub: workspace, workspace }, 60 * 60 * 24 * 7, env.JWT_SECRET);
-      return json({ token, workspace, issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, {}, origin);
+      // Non-expiring session: no TTL is passed, so the minted JWT carries
+      // no `exp` claim. `iat` is still set for audit/debugging.
+      const token = await signJwt({ sub: workspace, workspace }, env.JWT_SECRET);
+      return json({ token, workspace, issuedAt: Math.floor(Date.now() / 1000) }, {}, origin);
     }
 
     if (path === "/auth/workspaces" && request.method === "GET") {
