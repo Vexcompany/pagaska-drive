@@ -30,8 +30,8 @@ export interface AuthSession {
   workspace: Workspace;
   /** Unix epoch seconds. */
   issuedAt: number;
-  /** Unix epoch seconds. */
-  expiresAt: number;
+  /** Unix epoch seconds. Absent for non-expiring sessions. */
+  expiresAt?: number;
 }
 
 export interface DriveFile {
