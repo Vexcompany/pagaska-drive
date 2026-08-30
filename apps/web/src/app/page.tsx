@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
@@ -164,6 +165,12 @@ export default function LoginPage() {
               )}
             </button>
           </form>
+        </div>
+
+        <div className="mt-5 text-center text-xs text-slate-400">
+          <Link href="/privacy" className="hover:text-slate-600 transition-colors">
+            Privacy Policy
+          </Link>
         </div>
       </div>
     </main>
