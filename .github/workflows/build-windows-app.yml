@@ -31,23 +31,23 @@ jobs:
       - name: Build Pagaska Drive Windows app
         shell: pwsh
         run: |
-          $out = Join-Path $env:GITHUB_WORKSPACE "dist-windows"
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-
           nativefier "https://drive.pagaska.my.id" `
             --name "Pagaska Drive" `
             --platform windows `
             --arch x64 `
-            --out $out `
+            --out $env:GITHUB_WORKSPACE `
             --overwrite
 
       - name: Package Windows app
         shell: pwsh
         run: |
-          $app = Get-ChildItem -Path "$env:GITHUB_WORKSPACE/dist-windows" -Directory | Select-Object -First 1
+          $app = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Directory |
+            Where-Object { $_.Name -like "*-win32-x64" } |
+            Select-Object -First 1
 
           if (-not $app) {
-            Write-Error "Nativefier did not produce an application directory."
+            Write-Error "Nativefier did not produce a Windows x64 application directory."
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Directory | Select-Object Name
             exit 1
           }
 
